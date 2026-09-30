@@ -1,0 +1,539 @@
+{
+  "name": "Liste de courses hebdomadaire par e-mail",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                6
+              ],
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000001",
+      "name": "Chaque samedi 9h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c0000000-0000-4000-8000-000000000002",
+      "name": "Tester maintenant",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Liste d'exemple (Apple Notes n'est pas accessible automatiquement)\n// Pour tester le cas \"liste vide\", remplacez le tableau par : []\nconst articles = [\n  { nom: \"Spaghetti\", quantite: 2 },\n  { nom: \"Coquillettes\", quantite: 1 },\n  { nom: \"Oeufs\", quantite: 1 },\n  { nom: \"Spaghetti\", quantite: 1 },               // doublon -> fusionné en x3\n  { nom: \"Tomates\" },                              // sans quantité -> \"quantité à vérifier\"\n  { nom: \"Galette maison de mamie\", quantite: 1 }  // introuvable -> \"prix inconnu\"\n];\n\nreturn [{ json: { articles } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000003",
+      "name": "Liste d'exemple",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "v1",
+              "leftValue": "={{ ($json.articles || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000004",
+      "name": "Liste vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "ton-adresse@example.com",
+        "subject": "🛒 Ta liste de courses est vide",
+        "emailType": "text",
+        "message": "Ta liste est vide, pense à la remplir.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000005",
+      "name": "Rappel liste vide",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        -80
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Règles des specs : fusion des doublons + articles incomplets marqués\nconst articles = $input.first().json.articles;\nconst fusion = new Map();\nconst aVerifier = [];\n\nfor (const a of articles) {\n  const nom = (a.nom || '').trim();\n  if (!nom) continue;\n  const quantite = Number(a.quantite);\n\n  // Quantité absente ou à 0 -> \"quantité à vérifier\"\n  if (!quantite || quantite <= 0) {\n    aVerifier.push(nom);\n    continue;\n  }\n\n  // Doublon -> on additionne les quantités\n  const cle = nom.toLowerCase();\n  if (fusion.has(cle)) fusion.get(cle).quantite += quantite;\n  else fusion.set(cle, { nom, quantite });\n}\n\n// 1 item = 1 article\nconst sortie = [...fusion.values()].map(a => ({ json: { ...a, a_verifier: false } }));\naVerifier.forEach(nom => sortie.push({ json: { nom, quantite: null, a_verifier: true } }));\nreturn sortie;"
+      },
+      "id": "c0000000-0000-4000-8000-000000000006",
+      "name": "Nettoyer la liste",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://prices.openfoodfacts.org/api/v1/products",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "product_name__like",
+              "value": "={{ $json.nom }}"
+            },
+            {
+              "name": "order_by",
+              "value": "-price_count"
+            },
+            {
+              "name": "size",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000007",
+      "name": "Chercher le produit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://prices.openfoodfacts.org/api/v1/prices",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "product_code",
+              "value": "={{ $json.items && $json.items.length ? $json.items[0].code : 'aucun' }}"
+            },
+            {
+              "name": "currency",
+              "value": "EUR"
+            },
+            {
+              "name": "order_by",
+              "value": "-date"
+            },
+            {
+              "name": "size",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000008",
+      "name": "Chercher le prix",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "ton-adresse@example.com",
+        "subject": "⚠️ Alerte : liste de courses non envoyée",
+        "emailType": "text",
+        "message": "=La source de prix (Open Prices) ne répond pas. La liste de courses n'a pas été envoyée.\n\nDétail : {{ $json.error?.message || JSON.stringify($json.error) }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000009",
+      "name": "Alerte source de prix",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        -80
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "errorMessage": "Source de prix indisponible : liste non envoyée."
+      },
+      "id": "c0000000-0000-4000-8000-000000000010",
+      "name": "Arrêt (source de prix)",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// On retrouve chaque article grâce à sa position (même ordre dans tous les nœuds)\nconst articles = $('Nettoyer la liste').all();\nconst prix = $input.all();\n\nlet total = 0;\nlet nbPrixInconnus = 0;\n\nconst lignes = articles.map((article, i) => {\n  const { nom, quantite, a_verifier } = article.json;\n\n  if (a_verifier) {\n    return `<li>${nom} – <em>quantité à vérifier</em></li>`;\n  }\n\n  const p = prix[i]?.json?.items?.[0]?.price;\n  if (p === undefined || p === null) {\n    nbPrixInconnus++;\n    return `<li>${nom} ×${quantite} – <em>prix inconnu</em></li>`;\n  }\n\n  total += p * quantite;\n  return `<li>${nom} ×${quantite}</li>`;\n});\n\nconst date = $now.setZone('Europe/Paris').toFormat('dd/MM/yyyy');\n\nconst html = `\n<h2>🛒 Courses de la semaine</h2>\n<ul>${lignes.join('')}</ul>\n<p><strong>Nombre d'articles :</strong> ${articles.length}<br>\n<strong>Coût total estimé :</strong> ${total.toFixed(2).replace('.', ',')} €</p>\n<p style=\"color:#888;font-size:12px\">Estimation approximative (source : Open Prices).\n${nbPrixInconnus ? nbPrixInconnus + ' article(s) sans prix, non compté(s) dans le total.' : ''}</p>`;\n\nreturn [{ json: { sujet: `Courses de la semaine – ${date}`, html } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000011",
+      "name": "Construire le message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "ton-adresse@example.com",
+        "subject": "={{ $('Construire le message').first().json.sujet }}",
+        "emailType": "html",
+        "message": "={{ $('Construire le message').first().json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000012",
+      "name": "Envoyer la liste",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1680,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "m1",
+              "leftValue": "={{ $now.setZone('Europe/Paris').hour }}",
+              "rightValue": 12,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000013",
+      "name": "Avant midi ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1920,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "hours"
+      },
+      "id": "c0000000-0000-4000-8000-000000000014",
+      "name": "Attendre 1 heure",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        280
+      ],
+      "webhookId": "c0000000-0000-4000-8000-0000000000ff"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Envoi de l'e-mail impossible avant midi : abandon."
+      },
+      "id": "c0000000-0000-4000-8000-000000000015",
+      "name": "Arrêt (envoi impossible)",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🛒 Liste de courses hebdomadaire\nLes 3 nœuds Gmail utilisent le compte « Gmail account ».\n\nPour tester : cliquez sur **Tester maintenant** puis *Execute workflow*.\n\nCas testés : doublon (Spaghetti ×3), quantité manquante (Tomates), prix inconnu.",
+        "height": 220,
+        "width": 420,
+        "color": 4
+      },
+      "id": "c0000000-0000-4000-8000-000000000016",
+      "name": "Mode d’emploi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### ⚠️ Gestion des erreurs\n- Source de prix en panne → 3 essais, puis e-mail d'alerte et arrêt (liste non envoyée).\n- Envoi Gmail en échec → nouvel essai toutes les heures jusqu'à midi.",
+        "height": 200,
+        "width": 400,
+        "color": 3
+      },
+      "id": "c0000000-0000-4000-8000-000000000017",
+      "name": "Note erreurs",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        -320
+      ]
+    }
+  ],
+  "connections": {
+    "Chaque samedi 9h": {
+      "main": [
+        [
+          {
+            "node": "Liste d'exemple",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tester maintenant": {
+      "main": [
+        [
+          {
+            "node": "Liste d'exemple",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Liste d'exemple": {
+      "main": [
+        [
+          {
+            "node": "Liste vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Liste vide ?": {
+      "main": [
+        [
+          {
+            "node": "Rappel liste vide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nettoyer la liste",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nettoyer la liste": {
+      "main": [
+        [
+          {
+            "node": "Chercher le produit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chercher le produit": {
+      "main": [
+        [
+          {
+            "node": "Chercher le prix",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alerte source de prix",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chercher le prix": {
+      "main": [
+        [
+          {
+            "node": "Construire le message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alerte source de prix",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alerte source de prix": {
+      "main": [
+        [
+          {
+            "node": "Arrêt (source de prix)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire le message": {
+      "main": [
+        [
+          {
+            "node": "Envoyer la liste",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer la liste": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Avant midi ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avant midi ?": {
+      "main": [
+        [
+          {
+            "node": "Attendre 1 heure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Arrêt (envoi impossible)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attendre 1 heure": {
+      "main": [
+        [
+          {
+            "node": "Envoyer la liste",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris"
+  }
+}
