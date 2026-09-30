@@ -1,6 +1,18 @@
 # n8n workflows
 
-Mes workflows [n8n](https://n8n.io), exportés en JSON.
+Mes workflows [n8n](https://n8n.io), exportés en JSON, et les skills Claude Code qui m'aident à les concevoir.
+
+## Skills Claude Code
+
+| Skill | Rôle |
+|---|---|
+| [`interview`](skills/interview/SKILL.md) | Transforme une idée floue en spec complète, une question à la fois (le quoi, pas le comment). |
+| [`hostile-review`](skills/hostile-review/SKILL.md) | Relecture adverse : cherche comment le travail casse et classe chaque problème par gravité. |
+| [`doubt-driven-dev`](skills/doubt-driven-dev/SKILL.md) | Construire en listant ses doutes, en les levant par des preuves et en ne déclarant fini que ce qui est prouvé. |
+
+Enchaînement typique : `interview` → spec, `doubt-driven-dev` → construction, `hostile-review` → relecture avant publication.
+
+**Installation :** copier chaque dossier de `skills/` dans `~/.claude/skills/`, puis les appeler avec `/interview`, `/hostile-review` ou `/doubt-driven-dev` (Claude peut aussi les utiliser de lui-même quand la demande s'y prête).
 
 ## Liste de courses hebdomadaire par e-mail
 
