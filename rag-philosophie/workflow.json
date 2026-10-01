@@ -1,0 +1,984 @@
+{
+  "name": "Study case Rag",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Ingestion du livre ",
+        "formDescription": "Charge le livre dans la base (remplace la base existante)",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Les 100 citations de la philosophie",
+              "fieldType": "file"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        0
+      ],
+      "id": "0fb12f49-54bc-4aea-bf35-abba8bc3d3c0",
+      "name": "On form submission"
+    },
+    {
+      "id": "dc49b849-ab93-4b30-9728-02d1724b04ac",
+      "name": "Extraction du PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "Les_100_citations_de_la_philosophie",
+        "options": {}
+      }
+    },
+    {
+      "id": "b1e65595-b992-497c-8136-8b7695c3f422",
+      "name": "Cleaning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CLEANING : retire couverture, introduction et mentions parasites ; garde les 100 titres (table des matières) et le corps du livre\n// À ADAPTER au PDF utilisé :\n//  - PIED_DE_PAGE : texte (ou fragment) du pied de page répété dans le PDF. Il marque la fin de la table des matières,\n//    de l'introduction et de la couverture ; la dernière occurrence marque le début du corps du livre.\n//  - LIGNES_A_RETIRER : expressions régulières des lignes parasites à supprimer du corps (mentions d'éditeur, de remerciement...).\nconst PIED_DE_PAGE = 'A-ADAPTER-pied-de-page-repete-dans-le-PDF';\nconst LIGNES_A_RETIRER = [/^A-ADAPTER-ligne-parasite$/i];\n\nconst brut = $input.first().json.text;\nconst texte = (Array.isArray(brut) ? brut.join('\\n') : String(brut || '')).replace(/\\r\\n?/g, '\\n');\nconst lignes = texte.split('\\n').map(l => l.trim());\nconst estPied = l => l.toLowerCase().includes(PIED_DE_PAGE.toLowerCase());\n\nconst debutTdm = lignes.findIndex(l => /^Table des mati[eè]res$/i.test(l));\nif (debutTdm < 0) throw new Error('Table des matières introuvable : ce fichier est-il bien le livre attendu ?');\nconst finTdm = lignes.findIndex((l, i) => i > debutTdm && estPied(l));\nconst dernierPied = lignes.map(estPied).lastIndexOf(true);\nif (finTdm < 0 || dernierPied <= finTdm) throw new Error('Fin de la table des matières introuvable');\n\nconst titres = [];\nfor (const l of lignes.slice(debutTdm + 1, finTdm)) {\n  if (!l) continue;\n  if (l.startsWith('«')) titres.push(l);\n  else if (titres.length) titres[titres.length - 1] += ' ' + l;\n}\nif (titres.length !== 100) throw new Error('Attendu : 100 titres, trouvé : ' + titres.length);\n\nconst net = s => s.replace(/\\s+/g, ' ').replace(/\\s+»/g, ' »').trim();\nconst corps = lignes.slice(dernierPied + 1)\n  .filter(l => !LIGNES_A_RETIRER.some(re => re.test(l)))\n  .join('\\n').trim();\n\nreturn [{ json: { titres: titres.map(net), corps } }];"
+      }
+    },
+    {
+      "id": "4715ffe6-b1a4-4557-891e-8f8bde38e373",
+      "name": "Chunking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHUNKING : une sortie par citation, avec philosophe, dates, numéro et paragraphes du commentaire\nconst { titres, corps } = $input.first().json;\n\n// Repérage des titres dans le corps, en ignorant les retours à la ligne\nconst compact = []; const idx = [];\nfor (let i = 0; i < corps.length; i++) if (!/\\s/.test(corps[i])) { compact.push(corps[i]); idx.push(i); }\nconst flux = compact.join('');\nlet curseur = 0; const pos = [];\ntitres.forEach((t, i) => {\n  const tc = t.replace(/\\s+/g, '');\n  const p = flux.indexOf(tc, curseur);\n  if (p < 0) throw new Error('Titre introuvable n°' + (i + 1) + ' : ' + t);\n  pos.push({ debut: idx[p], fin: idx[p + tc.length - 1] + 1 });\n  curseur = p + tc.length;\n});\n\n// Largeur typique d'une ligne : sert à détecter les fins de paragraphe (ligne courte finissant par une ponctuation)\nconst longueurs = corps.split('\\n').map(l => l.length).sort((a, b) => a - b);\nconst largeur = longueurs[Math.floor(longueurs.length * 0.9)];\nconst recolle = lignes => lignes.reduce((s, l) => s.endsWith('-') ? s + l : (s ? s + ' ' + l : l), '');\n\nreturn titres.map((titre, i) => {\n  const segment = corps.slice(pos[i].fin, i + 1 < titres.length ? pos[i + 1].debut : corps.length);\n  const ls = segment.split('\\n').map(l => l.trim()).filter(Boolean);\n  let a = 0; let auteur = ls[a++];\n  while (auteur.includes('(') && !/\\)\\s*$/.test(auteur) && a < 3 && a < ls.length) auteur += ' ' + ls[a++];\n  const m = /^(.*?)\\s*\\(([^()]*)\\)\\s*$/.exec(auteur);\n  const paragraphes = []; let courant = [];\n  for (const l of ls.slice(a)) {\n    courant.push(l);\n    if (/[.!?»)…:]$/.test(l) && l.length < largeur * 0.8) { paragraphes.push(recolle(courant)); courant = []; }\n  }\n  if (courant.length) paragraphes.push(recolle(courant));\n  return { json: { numero: i + 1, citation: titre, philosophe: m ? m[1].trim() : auteur, dates: m ? m[2].trim() : '', paragraphes } };\n});"
+      }
+    },
+    {
+      "id": "35c7cfad-b186-4fbf-9cb2-3eca84998077",
+      "name": "Enrichissement Gemini",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Citation n° {{ $json.numero }} : {{ $json.citation }}\nPhilosophe : {{ $json.philosophe }}{{ $json.dates ? ' (' + $json.dates + ')' : '' }}\n\nCommentaire :\n{{ $json.paragraphes.join('\\n\\n') }}",
+        "hasOutputParser": true,
+        "batching": {
+          "batchSize": 2,
+          "delayBetweenBatches": 1500
+        },
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu aides à indexer le livre « Les 100 citations de la philosophie ». À partir d'une citation et de son commentaire, produis : resume (2 phrases en français), mots_cles (5 à 8 mots-clés ou notions), questions (3 questions qu'un lecteur pourrait poser et auxquelles ce passage répond), epoque (exactement une valeur de la liste du schéma). Pour l'époque, appuie-toi sur les dates du philosophe ; s'il n'y en a pas (textes bibliques), déduis-la du commentaire ; un philosophe contemporain relève de « XXe siècle »."
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "df289237-3dfb-4d97-b5e1-8fd268575c8a",
+      "name": "Gemini Flash (enrichissement)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1000,
+        240
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3-flash-preview",
+        "options": {
+          "temperature": 0.2
+        }
+      }
+    },
+    {
+      "id": "012f571f-5fb5-497b-9fc6-48c3f9ce959b",
+      "name": "Format de l'enrichissement",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1180,
+        240
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"resume\":{\"type\":\"string\"},\"mots_cles\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"questions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"epoque\":{\"type\":\"string\",\"enum\":[\"Antiquité\",\"Moyen Âge\",\"Renaissance\",\"XVIIe siècle\",\"Lumières\",\"XIXe siècle\",\"XXe siècle\"]}},\"required\":[\"resume\",\"mots_cles\",\"questions\",\"epoque\"]}"
+      }
+    },
+    {
+      "id": "658d1fbf-41b0-4044-91bc-f3fc487ff4b8",
+      "name": "Assemblage des chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// AUGMENTATION : fusionne l'enrichissement Gemini et les métadonnées, puis produit un item par chunk (un paragraphe = un chunk)\nconst sources = $('Chunking').all();\nconst enrichis = $input.all();\nif (enrichis.length !== sources.length) throw new Error('Enrichissement incomplet : ' + enrichis.length + ' réponses pour ' + sources.length + ' citations');\n\nconst sortie = [];\nenrichis.forEach((e, i) => {\n  const src = sources[i].json;\n  let enr = e.json.output ?? e.json.text ?? e.json;\n  if (typeof enr === 'string') enr = JSON.parse(enr);\n  if (!enr || !enr.resume || !Array.isArray(enr.mots_cles) || !Array.isArray(enr.questions) || !enr.epoque) {\n    throw new Error('Enrichissement invalide pour la citation n°' + src.numero);\n  }\n  src.paragraphes.forEach((p, k) => {\n    const texte = [\n      'Philosophe : ' + src.philosophe + (src.dates ? ' (' + src.dates + ')' : ''),\n      'Citation n°' + src.numero + ' : ' + src.citation,\n      '',\n      p,\n      '',\n      'Résumé : ' + enr.resume,\n      'Mots-clés : ' + enr.mots_cles.join(', '),\n      'Questions types : ' + enr.questions.join(' | ')\n    ].join('\\n');\n    sortie.push({ json: { texte, numero: src.numero, citation: src.citation, philosophe: src.philosophe, dates: src.dates, epoque: enr.epoque, paragraphe: k + 1 } });\n  });\n});\nreturn sortie;"
+      }
+    },
+    {
+      "id": "43e03276-a3b7-4886-ab23-dd2084343c5b",
+      "name": "Vectorisation",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.3,
+      "position": [
+        1560,
+        0
+      ],
+      "parameters": {
+        "mode": "insert",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "philo_100_citations"
+        },
+        "clearStore": true
+      }
+    },
+    {
+      "id": "5e648e5b-09c8-4d3f-9a5c-5cdda7d88925",
+      "name": "Chargeur de chunks",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        1700,
+        240
+      ],
+      "parameters": {
+        "dataType": "json",
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json.texte }}",
+        "textSplittingMode": "custom",
+        "options": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "numero",
+                "value": "={{ $json.numero }}"
+              },
+              {
+                "name": "citation",
+                "value": "={{ $json.citation }}"
+              },
+              {
+                "name": "philosophe",
+                "value": "={{ $json.philosophe }}"
+              },
+              {
+                "name": "dates",
+                "value": "={{ $json.dates }}"
+              },
+              {
+                "name": "epoque",
+                "value": "={{ $json.epoque }}"
+              },
+              {
+                "name": "paragraphe",
+                "value": "={{ $json.paragraphe }}"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "d45b1588-fdb7-4529-a6bf-30a2ac6efa17",
+      "name": "Pas de redécoupage",
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        440
+      ],
+      "parameters": {
+        "chunkSize": 4000,
+        "chunkOverlap": 0,
+        "options": {}
+      }
+    },
+    {
+      "id": "cfda9d2f-0052-4030-a832-7b96c06ed2c3",
+      "name": "Embeddings OpenAI",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1520,
+        240
+      ],
+      "parameters": {
+        "model": "text-embedding-3-small",
+        "options": {}
+      }
+    },
+    {
+      "id": "f6e16d55-a0ed-451f-9593-2517c2471b08",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        760
+      ],
+      "parameters": {
+        "public": false,
+        "options": {
+          "responseMode": "lastNode"
+        }
+      }
+    },
+    {
+      "id": "1f3bd27b-4886-41a5-b6e1-2f78802a7777",
+      "name": "Sélection",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        260,
+        760
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.chatInput }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu analyses un message envoyé à un assistant qui répond à partir du livre « Les 100 citations de la philosophie ». Renvoie : type = « salutation » si le message est vide, une simple salutation, un remerciement ou ne contient aucune question ; sinon « question » (même si la question n'a aucun rapport avec la philosophie). philosophe = le nom usuel du seul philosophe mentionné (ex. « Descartes »), ou chaîne vide s'il n'y en a aucun ou plusieurs. philosophes = la liste des noms usuels de tous les philosophes mentionnés (liste vide s'il n'y en a aucun). epoque = l'époque visée si la question la nomme clairement, sinon chaîne vide. plusieurs_philosophes = true si la question mentionne plusieurs philosophes. requete = la question reformulée en français pour une recherche sémantique : garde les noms propres et les notions clés, supprime les formules de politesse."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "5b37a8a8-f68b-44f4-ba35-9b6b68763ce3",
+      "name": "Gemini Flash (sélection)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        1000
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "24c85531-757d-428c-8c21-4d8c64f8ccbe",
+      "name": "Format de la sélection",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        400,
+        1000
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"salutation\",\"question\"]},\"philosophe\":{\"type\":\"string\"},\"philosophes\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"epoque\":{\"type\":\"string\",\"enum\":[\"\",\"Antiquité\",\"Moyen Âge\",\"Renaissance\",\"XVIIe siècle\",\"Lumières\",\"XIXe siècle\",\"XXe siècle\"]},\"plusieurs_philosophes\":{\"type\":\"boolean\"},\"requete\":{\"type\":\"string\"}},\"required\":[\"type\",\"philosophe\",\"philosophes\",\"epoque\",\"plusieurs_philosophes\",\"requete\"]}"
+      }
+    },
+    {
+      "id": "2d34084e-56fc-48ff-b3b6-326ba151bef4",
+      "name": "Salutation ou message vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        560,
+        760
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.output.type }}",
+              "rightValue": "salutation",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e991bd98-4214-4dfd-8a3e-8becb1825f0f",
+      "name": "Réponse d'accueil",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        820,
+        640
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "output",
+              "type": "string",
+              "value": "Bonjour ! Posez-moi une question sur la philosophie, par exemple « Que signifie « je pense, donc je suis » ? » ou « Que dit Sartre sur les autres ? ». Je réponds à partir du livre Les 100 citations de la philosophie."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f12b6279-7227-4b60-b363-7d6afd7ef7bc",
+      "name": "Recherche",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.3,
+      "position": [
+        820,
+        880
+      ],
+      "parameters": {
+        "mode": "load",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "philo_100_citations"
+        },
+        "prompt": "={{ $json.output.requete }}",
+        "topK": 40,
+        "includeDocumentMetadata": true
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "ace0354c-9609-43d7-87f5-2a3609b4f98e",
+      "name": "Embeddings OpenAI (recherche)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        1260
+      ],
+      "parameters": {
+        "model": "text-embedding-3-small",
+        "options": {}
+      }
+    },
+    {
+      "id": "2e74e8a7-5dab-4dbe-8903-1a08807ca823",
+      "name": "Filtrage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        880
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// FILTRAGE par métadonnées, après la recherche (le Simple Vector Store n'a pas de filtre natif)\nconst sel = $('Sélection').first().json.output;\nconst brut = $input.all().map(i => i.json).filter(j => j.document && j.document.pageContent);\nif (!brut.length) return [{ json: { vide: true } }];\n\nconst norm = s => String(s || '').normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase();\nlet retenus = brut;\nif (!sel.plusieurs_philosophes && (sel.philosophe || sel.epoque)) {\n  const f = brut.filter(j => {\n    const m = j.document.metadata || {};\n    return (!sel.philosophe || norm(m.philosophe).includes(norm(sel.philosophe))) && (!sel.epoque || norm(m.epoque) === norm(sel.epoque));\n  });\n  if (f.length) retenus = f; // si le filtre ne laisse rien, on garde tout\n}\n\n// Aperçu léger pour le reranking : en-tête + résumé + mots-clés (le texte complet reste pour la génération)\nconst apercu = t => { const l = t.split('\\n'); return [l[0], l[1], ...l.filter(x => /^(Résumé|Mots-clés) :/.test(x))].join('\\n'); };\n\nconst chunks = retenus.slice(0, 15).map((j, i) => ({\n  id: i + 1,\n  texte: j.document.pageContent,\n  apercu: apercu(j.document.pageContent),\n  numero: j.document.metadata.numero,\n  philosophe: j.document.metadata.philosophe,\n  citation: j.document.metadata.citation\n}));\nreturn [{ json: { vide: false, question: sel.requete, questionOriginale: $('When chat message received').first().json.chatInput, filtre: { philosophe: sel.philosophe, epoque: sel.epoque }, chunks } }];"
+      }
+    },
+    {
+      "id": "2edb78bf-bca6-45e0-80b5-88e8cd4899f8",
+      "name": "Base vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1340,
+        880
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.vide }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9427f8a2-adbd-4f52-b27e-268d6415fa31",
+      "name": "Réponse base vide",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1600,
+        780
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a2",
+              "name": "output",
+              "type": "string",
+              "value": "Le livre n'est pas encore chargé dans la base. Lancez d'abord l'ingestion (formulaire « Ingestion du livre »), puis reposez votre question."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "93947726-8f5c-4070-8491-f0ecfd49dcbd",
+      "name": "Reranking",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1600,
+        980
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'Question : ' + $json.questionOriginale + '\\n\\nPassages :\\n\\n' + $json.chunks.map(c => '[' + c.id + '] ' + c.apercu).join('\\n\\n') }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu es un reranker. Pour chaque passage numéroté entre crochets, donne un score de pertinence de 0 à 10 pour répondre à la question : 10 = répond directement, 5 = lien partiel, 0 à 2 = autre sujet ou aucun rapport. Sois sévère : un passage qui ne traite pas de ce que demande la question reçoit au plus 2. Exception : si la question compare plusieurs philosophes ou en mentionne plusieurs, un passage qui expose la position de l'un d'eux sur le thème demandé est pertinent (7 ou plus), même s'il ne parle pas des autres. Renvoie un score pour chaque passage."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d2c62826-f6ca-40e1-a09d-a5356fc097b1",
+      "name": "Gemini Flash (reranking)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1560,
+        1220
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "09f97e95-b6c3-4759-95cb-a5a41737d59e",
+      "name": "Format du reranking",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1740,
+        1220
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"scores\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"},\"score\":{\"type\":\"number\"}},\"required\":[\"id\",\"score\"]}}},\"required\":[\"scores\"]}"
+      }
+    },
+    {
+      "id": "f37f3cfd-e63b-49e6-bd50-c561329fd3ab",
+      "name": "Top 5 et seuil",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1860,
+        980
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// RERANKING (suite) : associe les notes de Gemini aux passages, garde les 5 meilleurs au-dessus du seuil\n// Question comparative : on garantit aussi le meilleur passage (score ≥ 4) de chaque philosophe cité\nconst { chunks, questionOriginale } = $('Filtrage').first().json;\nconst sel = $('Sélection').first().json.output;\nconst scores = ($input.first().json.output || {}).scores || [];\nconst note = new Map(scores.map(s => [Number(s.id), Number(s.score)]));\nconst SEUIL = 6;\nconst norm = s => String(s || '').normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase();\n\nconst classes = chunks.map(c => ({ ...c, score: note.get(c.id) ?? 0 })).sort((a, b) => b.score - a.score);\nconst retenus = classes.filter(c => c.score >= SEUIL).slice(0, 5);\n\nconst noms = sel.philosophes || [];\nif (noms.length > 1) {\n  for (const nom of noms) {\n    if (!retenus.some(c => norm(c.philosophe).includes(norm(nom)))) {\n      const meilleur = classes.find(c => norm(c.philosophe).includes(norm(nom)) && c.score >= 4);\n      if (meilleur) retenus.push(meilleur);\n    }\n  }\n}\n\nreturn [{ json: {\n  refus: retenus.length === 0,\n  questionOriginale,\n  meilleurScore: classes.length ? classes[0].score : 0,\n  retenus: retenus.map(c => ({ numero: c.numero, philosophe: c.philosophe, score: c.score })),\n  contexte: retenus.map(c => c.texte).join('\\n\\n---\\n\\n')\n} }];"
+      }
+    },
+    {
+      "id": "14907b08-da6b-4f20-86f8-a9960ef2cbab",
+      "name": "Rien de pertinent ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2120,
+        980
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.refus }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "8b2b2d9a-4476-4f86-9198-62ff13653845",
+      "name": "Réponse de refus",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2380,
+        880
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a3",
+              "name": "output",
+              "type": "string",
+              "value": "Je ne trouve pas la réponse à cette question dans le livre « Les 100 citations de la philosophie ». Essayez de la reformuler, ou demandez-moi par exemple ce que dit un philosophe du livre sur un thème précis."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "020bcd9d-4ce1-49cf-b782-7308b4ea72be",
+      "name": "Génération",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2380,
+        1080
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'Question : ' + $json.questionOriginale + '\\n\\nExtraits du livre :\\n\\n' + $json.contexte }}",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu réponds en français, uniquement à partir des extraits fournis du livre « Les 100 citations de la philosophie ». N'utilise aucune autre connaissance et n'invente rien. Rédige une réponse claire et concise. Termine par une section « Sources » qui liste, pour chaque extrait utilisé, la citation, le philosophe et le numéro de la citation, au format : « citation » — Philosophe (citation n° X). Ces informations figurent en tête de chaque extrait."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ce4e1b87-5452-4417-8eb0-d5cd2e81b8d8",
+      "name": "Gemini Flash (génération)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        2340,
+        1300
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3-flash-preview",
+        "options": {
+          "temperature": 0.3
+        }
+      }
+    },
+    {
+      "id": "01870a91-36ac-4005-8ae9-6179234f1366",
+      "name": "Réponse finale",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2640,
+        1080
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a4",
+              "name": "output",
+              "type": "string",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Extraction du PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction du PDF": {
+      "main": [
+        [
+          {
+            "node": "Cleaning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleaning": {
+      "main": [
+        [
+          {
+            "node": "Chunking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunking": {
+      "main": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (enrichissement)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format de l'enrichissement": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichissement Gemini": {
+      "main": [
+        [
+          {
+            "node": "Assemblage des chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemblage des chunks": {
+      "main": [
+        [
+          {
+            "node": "Vectorisation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chargeur de chunks": {
+      "ai_document": [
+        [
+          {
+            "node": "Vectorisation",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pas de redécoupage": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Chargeur de chunks",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Vectorisation",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Sélection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (sélection)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Sélection",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format de la sélection": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Sélection",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sélection": {
+      "main": [
+        [
+          {
+            "node": "Salutation ou message vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salutation ou message vide ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse d'accueil",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Recherche",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recherche": {
+      "main": [
+        [
+          {
+            "node": "Filtrage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI (recherche)": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Recherche",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrage": {
+      "main": [
+        [
+          {
+            "node": "Base vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Base vide ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse base vide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reranking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (reranking)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Reranking",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format du reranking": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Reranking",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reranking": {
+      "main": [
+        [
+          {
+            "node": "Top 5 et seuil",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Top 5 et seuil": {
+      "main": [
+        [
+          {
+            "node": "Rien de pertinent ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rien de pertinent ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse de refus",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Génération",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (génération)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Génération",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Génération": {
+      "main": [
+        [
+          {
+            "node": "Réponse finale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "RAG sur le livre Les 100 citations de la philosophie : Ingestion (formulaire) et Answering (chat). Ne contient aucune donnée du livre."
+  }
+}
