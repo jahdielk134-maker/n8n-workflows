@@ -65,3 +65,29 @@ Un RAG sur *Les 100 citations de la philosophie*, construit pour montrer les deu
 4. Lancer le formulaire avec votre PDF (environ 6 à 8 minutes), puis poser vos questions dans le chat.
 
 La base est en mémoire : elle est perdue si l'instance n8n redémarre. Le livre est protégé par le droit d'auteur : ce dépôt ne contient aucune donnée du livre, uniquement le workflow.
+
+## RAG sur un livre avec Supabase (exercice de cours)
+
+[`rag-supabase/workflow.json`](rag-supabase/workflow.json) · [`rag-supabase/spec.md`](rag-supabase/spec.md) · [`rag-supabase/schema.sql`](rag-supabase/schema.sql)
+
+Le même livre que le RAG précédent, mais avec une base **persistante** dans Supabase (table `embedding`), un AI Agent avec mémoire de conversation pour la réponse, et les consignes du cours sur le chunking et l'augmentation. Inspiré du template n8n [Create a Documentation Expert Bot with RAG, Gemini, and Supabase](https://n8n.io/workflows/5993-create-a-documentation-expert-bot-with-rag-gemini-and-supabase/).
+
+**Ingestion** (formulaire, envoi du PDF) :
+
+1. extraction du texte, puis cleaning ;
+2. chunking : découpage par citation et paragraphe, **découpage récursif** (1 200 caractères) et **chevauchement** (150 caractères), soit environ 170 chunks ;
+3. augmentation par Gemini : contexte, résumé, mots-clés, questions hypothétiques, entités et relations ;
+4. contrôle du nombre de chunks (entre 50 et 300) et nœud Limit, puis vidage de la table ;
+5. insertion dans Supabase **par lots de 10 avec une pause de 25 secondes** : sans cela, l'API d'embedding gratuite renvoie des vecteurs vides.
+
+**Answering** (chat) : sélection par Gemini, recherche dans Supabase (40 passages), filtre par métadonnées, reranking par Gemini, refus explicite si rien de pertinent, puis réponse de l'AI Agent avec ses sources.
+
+### Importer le workflow
+
+1. Dans Supabase, exécuter [`schema.sql`](rag-supabase/schema.sql) dans le SQL Editor.
+2. Dans n8n : **Create workflow** → **⋯** → **Import from File** → `workflow.json`.
+3. Créer et attacher un credential **Supabase** (URL du projet et clé `service_role`, à ne jamais partager) aux 3 nœuds Supabase, et un credential **Google Gemini** (clé gratuite de Google AI Studio) aux 2 nœuds « Embeddings Gemini ». Les modèles de texte peuvent utiliser les crédits Gateway de n8n ou la même clé.
+4. Dans le nœud **Cleaning**, renseigner `PIED_DE_PAGE` et `LIGNES_A_RETIRER` pour votre PDF.
+5. Lancer le formulaire (environ 15 à 18 minutes), puis poser vos questions dans le chat.
+
+Limites de l'offre gratuite de Gemini : environ 5 requêtes par minute sur le modèle de réponse, donc espacer les questions pendant une démonstration.
