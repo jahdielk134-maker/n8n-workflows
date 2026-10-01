@@ -39,7 +39,7 @@ Gestion des erreurs :
 
 ## RAG sur un livre de philosophie (exercice de cours)
 
-[`rag-philosophie/workflow.json`](rag-philosophie/workflow.json)
+[`rag-philosophie/workflow.json`](rag-philosophie/workflow.json) · [`rag-philosophie/spec.md`](rag-philosophie/spec.md) (la spec écrite avec le skill `interview`)
 
 Un RAG sur *Les 100 citations de la philosophie*, construit pour montrer les deux faces d'un RAG et chacune de leurs étapes.
 
