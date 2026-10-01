@@ -29,7 +29,7 @@ Exercice de cours n8n : construire un RAG sur le livre *Les 100 citations de la 
 
 ### Face 1 : Ingestion
 1. **Extraction :** lire le texte du PDF.
-2. **Cleaning :** ne garder que les 100 citations et leurs commentaires. Retirer la page éditeur, la table des matières, l'introduction et les mentions « OceanofPDF ». Recoller les lignes coupées par la mise en page. (Les accents et guillemets du PDF sont corrects : vérifié, aucun caractère corrompu.)
+2. **Cleaning :** ne garder que les 100 citations et leurs commentaires. Retirer la page éditeur, la table des matières, l'introduction et les mentions parasites (pied de page répété, mentions d'éditeur ou de remerciement). Recoller les lignes coupées par la mise en page. (Les accents et guillemets du PDF sont corrects : vérifié, aucun caractère corrompu.)
 3. **Chunking :** un chunk par paragraphe de commentaire. Si les frontières de paragraphes ne sont pas détectables de façon fiable, repli : découpage par taille (environ 800 caractères) à l'intérieur de chaque citation. Chaque chunk garde le titre de la citation et le philosophe, et commence par le nom du philosophe dans son texte.
 4. **Augmentation :** deux volets.
    - Métadonnées : philosophe, époque, numéro de la citation (position dans la table des matières), citation.
