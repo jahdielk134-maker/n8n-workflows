@@ -103,7 +103,7 @@ Légende : [x] prouvé par un test réel ; [ ] non prouvé ou non rejoué (la no
 - [x] « Que veut dire « je pense, donc je suis » ? » : la réponse cite Descartes avec ses sources (extraits 74 et 75), en 12 s.
 - [x] Une question hors sujet (recette de ratatouille) donne un refus, en 6 s ; une salutation reçoit l'accueil sans recherche.
 - [x] Une comparaison de deux entités (Descartes et Pascal) s'appuie sur des passages des deux, sources avec le nom du philosophe.
-- [x] Une relance (« Résume ça en une phrase ») est comprise grâce à l'historique Postgres. *Testée avec un identifiant de session fixe ; pas encore par toi dans l'interface du chat.*
+- [x] Une relance (« Résume ça en une phrase ») est comprise grâce à l'historique Postgres. *Testée d'abord avec un identifiant de session fixe, puis validée par l'utilisateur dans la vraie fenêtre « Open chat » de n8n (Descartes, comparaison Descartes/Pascal, relance « résume », hors-sujet, salutation : tout correct).*
 - [x] Les stratégies de chunking **sémantique** et **IA** donnent un chunk par sujet sur un texte de 8 sujets distincts. *Cas facile ; pas encore essayées sur un vrai livre.*
 - [x] L'**OCR Markdown** transcrit un PDF de test (titres, liste, accents) et les sections sont détectées ; testé par l'API et par le formulaire avec un vrai fichier.
 - [x] Le formulaire avec le mode « Rapide (texte) » sur un PDF fonctionne (test du 2 octobre).
