@@ -7,7 +7,7 @@ Un pipeline RAG qui n'est lié à aucun document : on indexe n'importe quel fich
 | [`1-ingestion-orchestrateur.json`](workflows/1-ingestion-orchestrateur.json) | Formulaire (ou webhook) → extraction (rapide ou OCR Markdown) → appelle les sous-workflows 2, 3 et 4 |
 | [`2-sous-workflow-chunking.json`](workflows/2-sous-workflow-chunking.json) | Nettoyage, découpage (**récursif**, **sémantique** ou **IA**), chevauchement |
 | [`3-sous-workflow-augmentation.json`](workflows/3-sous-workflow-augmentation.json) | Un appel Gemini par groupe de 8 chunks : contexte, résumé, mots-clés, questions, entités, relations |
-| [`4-sous-workflow-enregistrement.json`](workflows/4-sous-workflow-enregistrement.json) | Remplace le document dans Supabase ; embeddings par lots de 10 avec pause |
+| [`4-sous-workflow-enregistrement.json`](workflows/4-sous-workflow-enregistrement.json) | Remplace le document dans Supabase ; embeddings par lots de 10, avec attente seulement si Google signale un dépassement de quota |
 | [`5-sous-workflow-recherche.json`](workflows/5-sous-workflow-recherche.json) | Embedding des requêtes, recherche SQL, filtre, classement, reranking Gemini |
 | [`6-chat-orchestrateur.json`](workflows/6-chat-orchestrateur.json) | Chat : contexte (historique Postgres), routage, appelle le sous-workflow 5, AI Agent |
 
@@ -37,6 +37,6 @@ Un pipeline RAG qui n'est lié à aucun document : on indexe n'importe quel fich
 
 ## Limites à connaître
 
-- **Quotas de l'offre gratuite de Gemini** : environ 15 requêtes par minute par modèle et environ 1 000 embeddings par jour. L'enrichissement par groupes de 8 et la pause de 15 s entre les lots d'embeddings en tiennent compte ; sur un livre de 160 chunks, comptez environ 7 minutes.
-- La stratégie **sémantique** vectorise chaque phrase : limitée à 400 phrases. L'**OCR Markdown** transcrit tout le PDF en un appel : à réserver aux documents courts ou scannés.
+- **Quotas de l'offre gratuite de Gemini** : 100 textes d'embeddings par minute (mesuré), environ 15 requêtes par minute et par modèle de texte, environ 1 000 embeddings par jour. L'enrichissement par groupes de 8 chunks et l'attente automatique quand Google signale un dépassement en tiennent compte. Un livre de 160 chunks prenait 7 minutes avec l'ancienne pause fixe entre les lots ; sans elle, comptez environ 3 minutes (estimation, non mesurée sur le livre complet).
+- La stratégie **sémantique** vectorise chaque phrase : limitée à 100 phrases (quota de 100 textes par minute). L'**OCR Markdown** transcrit tout le PDF en un appel : à réserver aux documents courts ou scannés.
 - Les workflows ne sont pas publiés : à activer vous-même si besoin. Ce dépôt ne contient aucun contenu de document, aucune clé et aucun identifiant d'instance.

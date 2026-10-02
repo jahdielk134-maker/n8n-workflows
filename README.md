@@ -102,4 +102,4 @@ La suite des deux RAG précédents : un pipeline qui n'est plus lié à un livre
 
 **Answering** : **contexte** (historique des messages dans Postgres), **routage** (entités, mots-clés, plusieurs reformulations), **recherche** vectorielle, **reranking** par Gemini, réponse de l'AI Agent avec ses sources, ou refus explicite.
 
-Mesuré sur un livre de 161 chunks : indexé en moins de 7 minutes, réponses du chat en 9 à 14 secondes. Voir le [README du dossier](rag-universel/README.md) pour l'installation et les limites.
+Mesuré sur un livre de 161 chunks : indexé en 7 minutes avec l'ancienne pause fixe entre les lots d'embeddings (environ 3 minutes sans elle, estimation non remesurée sur le livre), réponses du chat en 8 à 20 secondes. Voir le [README du dossier](rag-universel/README.md) pour l'installation et les limites.

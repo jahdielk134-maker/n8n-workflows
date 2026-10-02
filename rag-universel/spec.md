@@ -43,12 +43,12 @@ Un pipeline **universel et réutilisable** : une face Ingestion qui accepte des 
 1. **Extraction :** routage par type de fichier. PDF en *Rapide* (texte brut), PDF en *OCR Markdown* (Gemini lit le PDF et renvoie du Markdown : titres, listes, tableaux), texte brut, HTML (balises retirées), CSV (une ligne devient un paragraphe « colonne : valeur »), RTF. Une transcription OCR tronquée est refusée.
 2. **Chunking (sous-workflow) :** nettoyage générique (césures, numéros de page, en-têtes répétés ; en Markdown, structure conservée), puis découpage selon la **stratégie** :
    - *Récursif* : on regroupe les paragraphes jusqu'à 1 200 caractères, un paragraphe trop long est coupé aux phrases puis aux mots ;
-   - *Sémantique* : chaque phrase est vectorisée et on coupe là où la ressemblance entre phrases voisines chute (limité à 400 phrases, à cause du quota gratuit d'embeddings) ;
+   - *Sémantique* : chaque phrase est vectorisée et on coupe là où la ressemblance entre phrases voisines chute (limité à 100 phrases, à cause du quota de 100 textes par minute de l'offre gratuite) ;
    - *IA* : Gemini choisit les points de coupure, fenêtre par fenêtre (8 000 caractères) ;
    - dans tous les cas : **overlap** (reprise de 1 à 2 phrases entières de 150 caractères environ du chunk précédent) ; en Markdown, chaque chunk commence par sa section (« Section : H1 > H2 ») et l'overlap ne traverse pas deux sections.
 3. **Garde-fous :** le nombre de chunks doit être entre 50 et 300 (modifiable). Hors bornes : arrêt avant tout appel Gemini et toute écriture, avec un message clair. Un nœud **Limit** plafonne ensuite. Avec un « nombre max de chunks » (démo, test), le plafond de 300 et le plancher de 50 ne s'appliquent plus.
 4. **Augmentation (sous-workflow) :** **un appel Gemini par groupe de 8 chunks** (deux appels en parallèle) ; chaque chunk reçoit son propre enrichissement : contexte, résumé, mots-clés, questions hypothétiques, entités (avec type), relations (sujet, relation, objet). Tout est ajouté au texte à vectoriser.
-5. **Vectorisation / enregistrement (sous-workflow) :** l'ancien document **de même collection et même titre** est supprimé (pas les autres), puis les chunks sont insérés **par lots de 10 avec 15 secondes de pause** (limite des embeddings gratuits). Tout l'enrichissement est terminé avant la moindre écriture. Un lot qui renvoie des vecteurs vides arrête l'ingestion avec un message clair.
+5. **Vectorisation / enregistrement (sous-workflow) :** l'ancien document **de même collection et même titre** est supprimé (pas les autres), puis les chunks sont insérés **par lots de 10, envoyés à la suite sans pause fixe**. Quand Google signale un dépassement de quota (100 textes par minute en offre gratuite), le pipeline **attend la durée indiquée par Google** (plus 2 secondes) et renvoie le même lot. Tout l'enrichissement est terminé avant la moindre écriture. Un lot qui renvoie des vecteurs vides arrête l'ingestion avec un message clair.
 
 ### Face 2 : Answering (suit le tableau du prof : Contexte → Routage → Recherche → Reranking → Génération)
 1. **Contexte :** nœud Configuration ; **historique** des 10 derniers messages de la session lu dans Postgres (`rag_messages`) ; branche « conversation vide » ; chaque échange est enregistré en fin de réponse.
@@ -67,7 +67,7 @@ Un pipeline **universel et réutilisable** : une face Ingestion qui accepte des 
 | Document hors de 50 à 300 chunks | Arrêt avant écriture, avec le nombre de chunks obtenu (sauf mode « nombre max de chunks ») |
 | PDF scanné en mode Rapide | Erreur « aucun texte extrait », avec le conseil d'essayer l'OCR Markdown |
 | OCR trop long pour une seule transcription | Erreur claire, conseil d'utiliser le mode Rapide |
-| Stratégie sémantique sur plus de 400 phrases | Erreur claire, conseil d'utiliser « récursif » ou « IA » |
+| Stratégie sémantique sur plus de 100 phrases | Erreur claire, conseil d'utiliser « récursif » ou « IA » |
 | Question hors sujet pour la collection | Refus explicite |
 | Collection vide ou inexistante | Message indiquant qu'aucun document n'est indexé |
 | Salutation ou message vide | Réponse courte d'invitation, sans recherche |
@@ -79,6 +79,8 @@ Un pipeline **universel et réutilisable** : une face Ingestion qui accepte des 
 |---|---|
 | Gemini renvoie « trop de requêtes » (429) pendant l'enrichissement | 5 tentatives ; sinon arrêt avant toute écriture, table intacte |
 | Erreur temporaire de Google pendant le chat (503) | 5 tentatives automatiques, puis message d'erreur clair |
+| Dépassement du quota d'embeddings (429, 100 textes par minute) | Attente de la durée indiquée par Google (plus 2 s), puis renvoi du même lot ; abandon après 25 attentes |
+| Quota **journalier** d'embeddings atteint | Arrêt immédiat avec un message clair (réessayer le lendemain ou activer la facturation Google), sans attente inutile |
 | Vecteurs vides renvoyés par l'API d'embeddings | Arrêt avec message clair ; le document peut rester partiel : relancer l'ingestion |
 | Échec de l'enregistrement de l'historique | La réponse est quand même renvoyée |
 | Un sous-workflow échoue | L'erreur remonte à l'orchestrateur avec le nom de l'étape |
@@ -87,8 +89,8 @@ Un pipeline **universel et réutilisable** : une face Ingestion qui accepte des 
 - **Universel :** aucune règle propre au livre dans les workflows ; seulement des paramètres et la description du document.
 - **Droit d'auteur :** aucun contenu de document, identifiant, URL Supabase ni clé dans les exports ou sur GitHub ; documents de test rédigés pour l'occasion.
 - **Secrets :** clés Supabase et Gemini uniquement dans les credentials n8n.
-- **Quotas de la clé gratuite :** 15 requêtes par minute par modèle (flash-lite) ; environ 1 000 embeddings par jour ; l'enrichissement se fait par groupes de 8 chunks pour rester dans la limite.
-- **Durées mesurées :** livre entier (161 chunks) en **6 min 51 s** (enrichissement 1 min 46, embeddings environ 5 min) ; réponse du chat de 9 à 14 secondes. **Estimation non mesurée :** une démo avec 60 chunks devrait prendre 2 à 3 minutes.
+- **Quotas de la clé gratuite (mesurés le 2 octobre) :** embeddings : **100 textes par minute** (quota `EmbedContentRequestsPerMinute…FreeTier`, qui se recharge en continu, environ 1,7 texte par seconde ; aucune limite en jetons observée, aucun vecteur vide) ; modèle flash-lite : 15 requêtes par minute ; environ 1 000 embeddings par jour (valeur de la documentation Google, non vérifiée ici). L'enrichissement se fait par groupes de 8 chunks pour rester dans la limite.
+- **Durées mesurées :** livre entier (161 chunks) en **6 min 51 s**, puis 7 min 25 s à la réindexation, **avec l'ancienne pause fixe de 15 s** (enrichissement 1 min 46, embeddings environ 5 min) ; réponse du chat de 8 à 20 secondes. **Après suppression de la pause fixe :** l'enregistrement de 105 chunks (11 lots) prend **16,5 s**. **Estimation non mesurée :** le livre entier devrait passer à environ **3 minutes** (enrichissement 1 min 46 + embeddings environ 1 min avec une attente de 37 s), et une démo avec 12 chunks à environ 30 secondes (mesuré : 6 chunks en 12 s, 12 chunks en 40 s avant la suppression de la pause).
 - Rien n'est publié sans accord.
 
 ## Critères d'acceptation
@@ -115,6 +117,6 @@ Légende : [x] prouvé par un test réel ; [ ] non prouvé ou non rejoué (la no
 - **Table partagée :** le RAG Supabase précédent vide **toute** la table `embedding` ; le pipeline universel utilise d'autres tables (`rag_*`), donc les deux ne se gênent pas.
 - **HTML et RTF :** les balises et codes sont retirés par des règles simples, qui marchent pour du texte courant mais pas à tous les coups.
 - **L'OCR d'un livre entier** n'a pas été mesuré (durée, limite de 65 000 jetons de sortie) : à réserver aux documents courts ou scannés.
-- **La stratégie sémantique** consomme le quota d'embeddings (une requête par phrase) : limitée à 400 phrases.
+- **La stratégie sémantique** consomme le quota d'embeddings (un texte par phrase) : limitée à **100 phrases** (environ 6 pages). Elle était d'abord limitée à 400 par erreur : la mesure du quota (100 textes par minute) a montré que le plafond réel est plus bas. La lever demanderait une boucle d'attente comme celle de l'enregistrement.
 - **Reranker du prof (« Jev »)** : non identifié, laissé de côté ; le reranking utilise Gemini flash-lite.
-- **Embeddings :** l'étape de 5 minutes pour le livre vient du débit de la clé gratuite ; une clé payante ou un réglage de pause plus fin la réduirait, sans test à ce jour.
+- **Embeddings :** la pause fixe de 15 s entre les lots, posée par précaution sans mesure, n'utilisait qu'un tiers du quota réel (100 textes par minute). Elle est supprimée : les lots partent à la suite et le pipeline n'attend que si Google le demande. Le mécanisme d'attente a été vérifié par une simulation (deux refus « 429 » factices, deux attentes, puis succès) mais **pas encore sur un vrai dépassement de quota** : il se produira naturellement sur un livre de plus de 130 chunks.

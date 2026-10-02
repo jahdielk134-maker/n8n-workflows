@@ -116,12 +116,82 @@
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ requests: $json.requests }) }}",
+        "jsonBody": "={{ JSON.stringify({ requests: $('Préparer embedding').first().json.requests }) }}",
         "options": {
-          "timeout": 60000
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
         }
       },
       "notes": "Credential à choisir : Google Gemini(PaLM) Api"
+    },
+    {
+      "id": "d837cd37-366a-f1c3-a6d2-3a1751342f1b",
+      "name": "Quota atteint ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1690,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "q1",
+              "leftValue": "={{ $json.statusCode === 429 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "eaa3d004-1732-9e2a-ce39-f898a6037554",
+      "name": "Calculer l'attente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1950,
+        -20
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// QUOTA : l'offre gratuite limite les embeddings à 100 textes par minute. Google indique combien de temps attendre ; on attend, puis on renvoie le même lot.\nconst r = $input.first().json;\nconst err = (r.body && r.body.error) || {};\nconst det = err.details || [];\nconst quotas = det.flatMap(d => d.violations || []).map(v => String(v.quotaId || ''));\nif (quotas.some(q => /PerDay/i.test(q))) throw new Error('Quota journalier d\\'embeddings atteint (offre gratuite) : réessayez demain ou activez la facturation Google. Aucun nouveau lot n\\'a été enregistré.');\nif ($runIndex >= 25) throw new Error('Trop de dépassements du quota d\\'embeddings (' + $runIndex + ') : abandon.');\nconst delai = parseFloat(String((det.find(d => d.retryDelay) || {}).retryDelay)) || 35;\nreturn [{ json: { attente: Math.min(Math.ceil(delai) + 2, 90) } }];"
+      }
+    },
+    {
+      "id": "5d093dfc-a835-594d-90d5-6cacbb906a2e",
+      "name": "Attente quota",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2210,
+        -20
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $json.attente }}",
+        "unit": "seconds"
+      }
     },
     {
       "id": "6dd180aa-5806-c5ab-4a26-55a84376efd6",
@@ -135,7 +205,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// Associe chaque vecteur à son chunk. Garde-fou : l'API gratuite peut renvoyer des vecteurs vides sans erreur.\nconst { chunks } = $('Préparer embedding').first().json;\nconst emb = $input.first().json.embeddings || [];\nif (emb.length !== chunks.length) throw new Error('Embeddings incomplets : ' + emb.length + ' vecteurs pour ' + chunks.length + ' chunks');\nconst vides = emb.filter(e => !e.values || !e.values.length).length;\nif (vides) throw new Error(vides + ' vecteur(s) vide(s) renvoyé(s) par l\\'API d\\'embedding (limite de débit ?)');\n\nconst lignes = chunks.map((c, i) => ({\n  ordre: c.ordre, content: c.texte, contexte: c.contexte, resume: c.resume, questions: c.questions,\n  metadata: { collection: c.collection, source: c.source, titre: c.titre, entites: c.entites.map(e => e.nom), mots_cles: c.mots_cles },\n  embedding: '[' + emb[i].values.join(',') + ']',\n  mots_cles: c.mots_cles, entites: c.entites, relations: c.relations\n}));\nreturn [{ json: { lignes: JSON.stringify(lignes), document_id: chunks[0].document_id } }];"
+        "jsCode": "// Associe chaque vecteur à son chunk. Garde-fous : erreur HTTP explicite ; l'API gratuite peut aussi renvoyer des vecteurs vides sans erreur.\nconst { chunks } = $('Préparer embedding').first().json;\nconst rep = $input.first().json;\nif (rep.statusCode && rep.statusCode !== 200) throw new Error('Embeddings : erreur HTTP ' + rep.statusCode + ' — ' + String((rep.body && rep.body.error && rep.body.error.message) || '').slice(0, 200));\nconst emb = (rep.body && rep.body.embeddings) || [];\nif (emb.length !== chunks.length) throw new Error('Embeddings incomplets : ' + emb.length + ' vecteurs pour ' + chunks.length + ' chunks');\nconst vides = emb.filter(e => !e.values || !e.values.length).length;\nif (vides) throw new Error(vides + ' vecteur(s) vide(s) renvoyé(s) par l\\'API d\\'embedding (limite de débit ?)');\n\nconst lignes = chunks.map((c, i) => ({\n  ordre: c.ordre, content: c.texte, contexte: c.contexte, resume: c.resume, questions: c.questions,\n  metadata: { collection: c.collection, source: c.source, titre: c.titre, entites: c.entites.map(e => e.nom), mots_cles: c.mots_cles },\n  embedding: '[' + emb[i].values.join(',') + ']',\n  mots_cles: c.mots_cles, entites: c.entites, relations: c.relations\n}));\nreturn [{ json: { lignes: JSON.stringify(lignes), document_id: chunks[0].document_id } }];"
       }
     },
     {
@@ -156,21 +226,6 @@
         }
       },
       "notes": "Credential à choisir : Postgres (Supabase, Session pooler)"
-    },
-    {
-      "id": "287895bb-aeff-2a86-d325-d69e8d30697e",
-      "name": "Pause 15 s",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [
-        2340,
-        120
-      ],
-      "parameters": {
-        "resume": "timeInterval",
-        "amount": "={{ $('Lots de 10').context.noItemsLeft ? 0 : 15 }}",
-        "unit": "seconds"
-      }
     },
     {
       "id": "26363176-83bd-c98d-88c8-f0fbc3ec082f",
@@ -266,7 +321,47 @@
       "main": [
         [
           {
+            "node": "Quota atteint ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quota atteint ?": {
+      "main": [
+        [
+          {
+            "node": "Calculer l'attente",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Préparer insertion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculer l'attente": {
+      "main": [
+        [
+          {
+            "node": "Attente quota",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attente quota": {
+      "main": [
+        [
+          {
+            "node": "Embedding HTTP",
             "type": "main",
             "index": 0
           }
@@ -288,17 +383,6 @@
       "main": [
         [
           {
-            "node": "Pause 15 s",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Pause 15 s": {
-      "main": [
-        [
-          {
             "node": "Lots de 10",
             "type": "main",
             "index": 0
@@ -312,6 +396,6 @@
     "executionOrder": "v1"
   },
   "meta": {
-    "description": "Sous-workflow universel : remplace un document dans Supabase (documents, chunks, embeddings, mots-clés, entités, relations) par lots de 10 avec pause."
+    "description": "Sous-workflow universel : remplace un document dans Supabase (documents, chunks, embeddings, mots-clés, entités, relations) par lots de 10, sans pause fixe : attente seulement quand l'API signale un dépassement de quota (100 textes par minute en offre gratuite)."
   }
 }
