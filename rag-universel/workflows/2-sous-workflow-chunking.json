@@ -1,0 +1,455 @@
+{
+  "name": "RAG - Chunking (sous-workflow)",
+  "nodes": [
+    {
+      "id": "fa4ee6a0-d76e-b4b4-72f4-b4bfd0114432",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "da34d78d-c990-1429-9fda-d350dff73abd",
+      "name": "Nettoyage générique",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// NETTOYAGE GÉNÉRIQUE : normalise le texte d'un document quelconque (aucune règle propre à un livre) ; en Markdown, garde la structure (titres, listes)\nconst item = $input.first().json;\nlet t = String(item.texte || '');\nif (!t.trim()) throw new Error('Aucun texte extrait du document (PDF scanné ou fichier vide ? essayez le mode « OCR Markdown »)');\nconst markdown = item.format === 'markdown';\n\nt = t.replace(/\\r\\n?/g, '\\n').replace(/­/g, '').replace(/[​﻿]/g, '').replace(/\\f/g, '\\n\\n');\nt = t.replace(/(\\p{L})-\\n(\\p{L})/gu, '$1$2'); // césures de fin de ligne (lettres accentuées comprises)\nif (markdown) t = t.replace(/^(#{1,6}\\s+.*)$/gm, '\\n$1\\n'); // un titre est toujours un paragraphe à part\nlet lignes = t.split('\\n').map(l => l.replace(/[ \\t]+/g, ' ').trim());\n\nif (item.format === 'pdf') {\n  // numéros de page isolés\n  lignes = lignes.filter(l => !/^(page\\s*)?\\d{1,4}(\\s*\\/\\s*\\d{1,4})?$/i.test(l));\n  // en-têtes et pieds de page : lignes courtes qui reviennent très souvent\n  const compte = new Map();\n  lignes.forEach(l => { if (l && l.length < 80) compte.set(l, (compte.get(l) || 0) + 1); });\n  const repetees = new Set([...compte].filter(([, n]) => n >= 5 && n >= lignes.length / 100).map(([l]) => l));\n  lignes = lignes.filter(l => !repetees.has(l));\n}\n\nconst brut = lignes.join('\\n').split(/\\n{2,}/)\n  .map(p => (markdown ? p.trim() : p.replace(/\\s*\\n\\s*/g, ' ').replace(/\\s{2,}/g, ' ').trim()))\n  .filter(Boolean);\n\n// En Markdown, les titres ne sont pas des paragraphes : ils donnent la « section » (H1 > H2 > H3) des paragraphes qui suivent\nconst paragraphes = [];\nconst sections = [];\nconst pile = [];\nfor (const p of brut) {\n  const m = markdown ? p.match(/^(#{1,6})\\s+(.*)$/) : null;\n  if (m) {\n    const niveau = m[1].length;\n    pile[niveau - 1] = m[2].trim();\n    pile.length = niveau;\n    continue;\n  }\n  paragraphes.push(p);\n  sections.push(pile.filter(Boolean).join(' > '));\n}\nif (!paragraphes.length) throw new Error('Aucun texte exploitable après nettoyage');\n\nreturn [{ json: { ...item, paragraphes, sections } }];"
+      }
+    },
+    {
+      "id": "3763dc02-b3bc-6c05-9ada-40e1d0a869a6",
+      "name": "Choix de la stratégie",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "renameOutput": true,
+              "outputKey": "recursif",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.params.strategie || 'recursif' }}",
+                    "rightValue": "recursif",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "semantique",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.params.strategie || 'recursif' }}",
+                    "rightValue": "semantique",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "ia",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.params.strategie || 'recursif' }}",
+                    "rightValue": "ia",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "autre (récursif)"
+        }
+      }
+    },
+    {
+      "id": "21996e24-073e-bcb9-55b1-2b816f0ee9c7",
+      "name": "Découpage récursif",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        -120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// DÉCOUPAGE RÉCURSIF : on regroupe les paragraphes jusqu'à TAILLE caractères ; un paragraphe trop long est coupé aux fins de phrase, puis aux mots.\n// En Markdown, on change de chunk quand la section change (si le chunk en cours est assez rempli).\nconst item = $input.first().json;\nconst TAILLE = Number(item.params && item.params.taille) || 1200;\nconst SEPARATEURS = [/(?<=[.!?…»;:])\\s+/, /\\s+/];\n\nconst decoupe = (texte, seps) => {\n  if (texte.length <= TAILLE) return [texte];\n  if (!seps.length) { const r = []; for (let i = 0; i < texte.length; i += TAILLE) r.push(texte.slice(i, i + TAILLE)); return r; }\n  const [sep, ...suite] = seps;\n  const morceaux = []; let courant = '';\n  for (const p of texte.split(sep)) {\n    const essai = courant ? courant + ' ' + p : p;\n    if (essai.length <= TAILLE) { courant = essai; continue; }\n    if (courant) morceaux.push(courant);\n    if (p.length > TAILLE) { morceaux.push(...decoupe(p, suite)); courant = ''; } else courant = p;\n  }\n  if (courant) morceaux.push(courant);\n  return morceaux;\n};\n\nconst chunks = []; const chunk_sections = [];\nlet courant = ''; let secCourante = '';\nconst vider = () => { if (courant) { chunks.push(courant); chunk_sections.push(secCourante); } courant = ''; };\nitem.paragraphes.forEach((p, i) => {\n  const sec = (item.sections || [])[i] || '';\n  for (const m of decoupe(p, SEPARATEURS)) {\n    const changeSection = courant && sec !== secCourante && courant.length >= TAILLE * 0.3;\n    const essai = courant ? courant + '\\n\\n' + m : m;\n    if (!changeSection && essai.length <= TAILLE) { if (!courant) secCourante = sec; courant = essai; }\n    else { vider(); courant = m; secCourante = sec; }\n  }\n});\nvider();\n\nreturn [{ json: { ...item, chunks, chunk_sections } }];"
+      }
+    },
+    {
+      "id": "6c204630-5965-cd7b-1b88-17efb99b05db",
+      "name": "Phrases (sémantique)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHUNKING SÉMANTIQUE (1/3) : découpe le document en phrases et prépare des lots de 20 phrases à vectoriser\nconst item = $input.first().json;\nconst TAILLE = Number(item.params && item.params.taille) || 1200;\nconst MAX_PHRASES = Number(item.params && item.params.max_phrases_semantique) || 400;\n\nconst phrases = [];\nitem.paragraphes.forEach((p, i) => {\n  const section = (item.sections || [])[i] || '';\n  for (const s of p.split(/(?<=[.!?…»])\\s+/)) {\n    let reste = s.trim();\n    while (reste.length > TAILLE) { // phrase démesurée : coupée aux mots\n      let k = reste.lastIndexOf(' ', TAILLE); if (k < 1) k = TAILLE;\n      phrases.push({ t: reste.slice(0, k), s: section }); reste = reste.slice(k).trim();\n    }\n    if (reste) phrases.push({ t: reste, s: section });\n  }\n});\nif (phrases.length > MAX_PHRASES) {\n  throw new Error('La stratégie « sémantique » vectorise chaque phrase et est limitée à ' + MAX_PHRASES + ' phrases (quota gratuit d\\'embeddings) : ce document en compte ' + phrases.length + '. Utilisez la stratégie « récursif » ou « IA ».');\n}\n\nconst lots = [];\nfor (let i = 0; i < phrases.length; i += 20) {\n  const lot = phrases.slice(i, i + 20);\n  lots.push({ json: { debut: i, phrases: lot, requests: lot.map(x => ({ model: 'models/gemini-embedding-001', content: { parts: [{ text: x.t }] } })) } });\n}\nreturn lots;"
+      }
+    },
+    {
+      "id": "d4ba9799-d405-5502-a8cf-4921c697d554",
+      "name": "Embeddings des phrases",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1040,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ requests: $json.requests }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "notes": "Credential à choisir : Google Gemini(PaLM) Api",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "72880f5d-1d9e-4e94-fdfe-8209c9a15066",
+      "name": "Coupures sémantiques",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHUNKING SÉMANTIQUE (2/3) : mesure la ressemblance entre phrases voisines (cosinus des vecteurs) et coupe là où le sens change le plus\nconst item = $('Choix de la stratégie').first().json;\nconst lots = $('Phrases (sémantique)').all().map(i => i.json);\nconst reponses = $input.all().map(i => i.json);\nconst TAILLE = Number(item.params && item.params.taille) || 1200;\nconst MIN = Number(item.params && item.params.taille_min) || Math.min(300, Math.round(TAILLE / 4));\n\nconst phrases = lots.flatMap(l => l.phrases);\nconst vecteurs = reponses.flatMap(r => (r.embeddings || []).map(e => e.values));\nif (vecteurs.length !== phrases.length || vecteurs.some(v => !v || !v.length)) {\n  throw new Error('Embeddings incomplets pour le découpage sémantique : ' + vecteurs.length + ' vecteurs pour ' + phrases.length + ' phrases (limite de débit ?)');\n}\n\nconst cosinus = (a, b) => { let d = 0, na = 0, nb = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; } return d / Math.sqrt(na * nb); };\nconst sims = [];\nfor (let i = 0; i < phrases.length - 1; i++) sims.push(cosinus(vecteurs[i], vecteurs[i + 1]));\n\n// seuil de rupture : moyenne des ressemblances moins 0,5 écart-type (réglable avec params.sensibilite)\nconst moyenne = sims.reduce((a, b) => a + b, 0) / (sims.length || 1);\nconst ecart = Math.sqrt(sims.reduce((a, b) => a + (b - moyenne) ** 2, 0) / (sims.length || 1));\nconst k = item.params && item.params.sensibilite !== undefined ? Number(item.params.sensibilite) : 0.5;\nconst seuil = moyenne - k * ecart;\n\nconst chunks = []; const chunk_sections = [];\nlet cur = []; let longueur = 0;\nconst vider = () => { if (cur.length) { chunks.push(cur.map(x => x.t).join(' ')); chunk_sections.push(cur[0].s); } cur = []; longueur = 0; };\nphrases.forEach((p, i) => {\n  const rupture = i > 0 && sims[i - 1] < seuil && longueur >= MIN;\n  const tropLong = i > 0 && longueur + p.t.length + 1 > TAILLE;\n  if (rupture || tropLong) vider();\n  cur.push(p); longueur += p.t.length + 1;\n});\nvider();\n\nreturn [{ json: { ...item, chunks, chunk_sections, debug_semantique: { phrases: phrases.length, coupures: chunks.length - 1, moyenne: +moyenne.toFixed(3), ecart: +ecart.toFixed(3), seuil: +seuil.toFixed(3) } } }];"
+      }
+    },
+    {
+      "id": "23a8c486-7bcf-ce45-1911-4d2506d82327",
+      "name": "Fenêtres (IA)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHUNKING IA (1/3) : numérote les phrases et les répartit en fenêtres (8 000 caractères par défaut) ; Gemini indiquera, fenêtre par fenêtre, où commence chaque nouveau morceau\nconst item = $input.first().json;\nconst TAILLE = Number(item.params && item.params.taille) || 1200;\nconst MIN = Number(item.params && item.params.taille_min) || Math.min(300, Math.round(TAILLE / 4));\nconst FENETRE = Number(item.params && item.params.fenetre_ia) || 8000;\nconst MAX_FENETRES = Number(item.params && item.params.max_fenetres_ia) || 40;\n\nconst phrases = [];\nitem.paragraphes.forEach((p, i) => {\n  const section = (item.sections || [])[i] || '';\n  for (const s of p.split(/(?<=[.!?…»])\\s+/)) {\n    let reste = s.trim();\n    while (reste.length > TAILLE) { // phrase démesurée : coupée aux mots\n      let k = reste.lastIndexOf(' ', TAILLE); if (k < 1) k = TAILLE;\n      phrases.push({ t: reste.slice(0, k), s: section, p: i }); reste = reste.slice(k).trim();\n    }\n    if (reste) phrases.push({ t: reste, s: section, p: i });\n  }\n});\n\nconst fenetres = [];\nlet debut = 0;\nwhile (debut < phrases.length) {\n  let fin = debut; let n = 0;\n  while (fin < phrases.length && (n === 0 || n + phrases[fin].t.length <= FENETRE)) { n += phrases[fin].t.length + 8; fin++; }\n  fenetres.push({ debut, fin });\n  debut = fin;\n}\nif (fenetres.length > MAX_FENETRES) {\n  throw new Error('La stratégie « IA » est limitée à ' + MAX_FENETRES + ' fenêtres de ' + FENETRE + ' caractères (quota de requêtes) : ce document en demande ' + fenetres.length + '. Utilisez la stratégie « récursif ».');\n}\n\nreturn fenetres.map(({ debut, fin }) => {\n  const lot = phrases.slice(debut, fin);\n  const prompt = 'Voici un extrait d\\'un document, découpé en phrases numérotées. Indique les numéros des phrases qui doivent COMMENCER un nouveau morceau, là où le sujet ou l\\'idée change. Chaque morceau doit traiter d\\'une seule idée et faire entre ' + MIN + ' et ' + TAILLE + ' caractères environ ; ne coupe jamais au milieu d\\'un raisonnement ou d\\'une énumération. Ne renvoie pas le numéro de la toute première phrase.\\n\\n' + lot.map((x, i) => '[' + (debut + i + 1) + '] ' + x.t).join('\\n');\n  return { json: { debut, fin, phrases: lot, prompt } };\n});"
+      }
+    },
+    {
+      "id": "e8a8c9e5-1f1b-510d-cd7a-bfff371f9278",
+      "name": "Découpage IA",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1040,
+        400
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu découpes un document en morceaux cohérents pour une base de connaissances. Tu réponds uniquement avec les numéros de phrases demandés, sans rien inventer."
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "abe62de3-60b3-56bf-824e-679c990de333",
+      "name": "Gemini Flash-Lite (découpage IA)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1000,
+        620
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "a6ca9bdb-fef8-24f0-fad5-b82dc7f31764",
+      "name": "Format du découpage",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1180,
+        620
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"coupures\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}},\"required\":[\"coupures\"]}"
+      }
+    },
+    {
+      "id": "5f06f616-872f-48cd-0918-d161592a14dc",
+      "name": "Chunks (IA)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHUNKING IA (2/3) : assemble les morceaux à partir des coupures choisies par Gemini ; garde-fous : morceau trop long coupé aux phrases, morceau trop court rattaché au précédent\nconst item = $('Choix de la stratégie').first().json;\nconst fenetres = $('Fenêtres (IA)').all().map(i => i.json);\nconst sorties = $input.all().map(i => i.json.output || i.json);\nconst TAILLE = Number(item.params && item.params.taille) || 1200;\nconst MIN = Number(item.params && item.params.taille_min) || Math.min(300, Math.round(TAILLE / 4));\n\nconst phrases = fenetres.flatMap(f => f.phrases);\nconst debuts = new Set([0]);\nlet coupuresIA = 0;\nsorties.forEach(o => (o.coupures || []).forEach(n => {\n  const k = Number(n) - 1; // numéros 1-based dans le prompt\n  if (Number.isInteger(k) && k > 0 && k < phrases.length) { debuts.add(k); coupuresIA++; }\n}));\nconst bornes = [...debuts].sort((a, b) => a - b);\n\n// segments bruts\nlet segments = bornes.map((d, i) => phrases.slice(d, i + 1 < bornes.length ? bornes[i + 1] : phrases.length));\n// morceau trop long : regroupé phrase par phrase\nsegments = segments.flatMap(seg => {\n  const total = seg.reduce((a, x) => a + x.t.length + 1, 0);\n  if (total <= TAILLE) return [seg];\n  const res = []; let cur = []; let l = 0;\n  for (const x of seg) { if (cur.length && l + x.t.length + 1 > TAILLE) { res.push(cur); cur = []; l = 0; } cur.push(x); l += x.t.length + 1; }\n  if (cur.length) res.push(cur);\n  return res;\n});\n// morceau trop court : rattaché au précédent si le total reste raisonnable\nconst fusion = [];\nfor (const seg of segments) {\n  const l = seg.reduce((a, x) => a + x.t.length + 1, 0);\n  const prec = fusion[fusion.length - 1];\n  const lp = prec ? prec.reduce((a, x) => a + x.t.length + 1, 0) : 0;\n  if (prec && l < MIN && lp + l <= TAILLE * 1.2) prec.push(...seg); else fusion.push([...seg]);\n}\n\nconst chunks = fusion.map(seg => seg.map(x => x.t).join(' '));\nconst chunk_sections = fusion.map(seg => seg[0].s);\nreturn [{ json: { ...item, chunks, chunk_sections, debug_ia: { phrases: phrases.length, fenetres: fenetres.length, coupures_ia: coupuresIA, chunks: chunks.length } } }];"
+      }
+    },
+    {
+      "id": "40ffddbc-b229-606e-9800-6a63b99438fe",
+      "name": "Chevauchement",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// CHEVAUCHEMENT (overlap) : chaque chunk reprend la fin du précédent sous forme de phrases entières (au moins CHEVAUCHEMENT caractères si possible, jamais plus de 3 × CHEVAUCHEMENT) ; à défaut, coupe au mot.\n// Pas de reprise quand la section Markdown change. En Markdown, chaque chunk commence par sa section (« Section : H1 > H2 »). Sortie : un item par chunk.\nconst item = $input.first().json;\nconst CHEVAUCHEMENT = item.params && item.params.chevauchement !== undefined ? Number(item.params.chevauchement) : 150;\nconst sections = item.chunk_sections || [];\n\nconst queueDePhrases = (prec) => {\n  const phrases = prec.split(/(?<=[.!?…»])\\s+/);\n  let queue = '';\n  for (let k = phrases.length - 1; k >= 0; k--) {\n    const essai = queue ? phrases[k] + ' ' + queue : phrases[k];\n    if (essai.length > CHEVAUCHEMENT * 3) break;\n    queue = essai;\n    if (queue.length >= CHEVAUCHEMENT) break;\n  }\n  if (queue) return queue;\n  const coupe = prec.slice(-CHEVAUCHEMENT);\n  const esp = coupe.indexOf(' ');\n  return esp > -1 && prec.length > CHEVAUCHEMENT ? coupe.slice(esp + 1) : coupe;\n};\n\nreturn item.chunks.map((texte, i) => {\n  const memeSection = (sections[i] || '') === (sections[i - 1] || '');\n  const avec = i > 0 && CHEVAUCHEMENT > 0 && memeSection ? queueDePhrases(item.chunks[i - 1]) + ' ' + texte : texte;\n  const section = sections[i] || '';\n  return { json: { collection: item.collection, titre: item.titre, description: item.description, source: item.source, format: item.format, params: item.params, ordre: i + 1, section, texte: (section ? 'Section : ' + section + '\\n' : '') + avec } };\n});"
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Nettoyage générique",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nettoyage générique": {
+      "main": [
+        [
+          {
+            "node": "Choix de la stratégie",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Choix de la stratégie": {
+      "main": [
+        [
+          {
+            "node": "Découpage récursif",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Phrases (sémantique)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fenêtres (IA)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Découpage récursif",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Découpage récursif": {
+      "main": [
+        [
+          {
+            "node": "Chevauchement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Phrases (sémantique)": {
+      "main": [
+        [
+          {
+            "node": "Embeddings des phrases",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings des phrases": {
+      "main": [
+        [
+          {
+            "node": "Coupures sémantiques",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coupures sémantiques": {
+      "main": [
+        [
+          {
+            "node": "Chevauchement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fenêtres (IA)": {
+      "main": [
+        [
+          {
+            "node": "Découpage IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Découpage IA": {
+      "main": [
+        [
+          {
+            "node": "Chunks (IA)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunks (IA)": {
+      "main": [
+        [
+          {
+            "node": "Chevauchement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash-Lite (découpage IA)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Découpage IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format du découpage": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Découpage IA",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Sous-workflow universel : nettoyage générique, découpage (récursif, sémantique ou IA) et chevauchement. Entrée : un item {texte, collection, titre, description, source, format, params}. Sortie : un item par chunk."
+  }
+}

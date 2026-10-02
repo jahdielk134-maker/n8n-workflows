@@ -1,0 +1,945 @@
+{
+  "name": "RAG - Ingestion (orchestrateur)",
+  "nodes": [
+    {
+      "id": "e16bac91-3475-6c3a-24cc-ab536693b927",
+      "name": "Formulaire",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "formTitle": "Indexer un document",
+        "formDescription": "Ajoute ou remplace un document dans la base de connaissances (PDF, TXT, MD, HTML, CSV, RTF).",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Fichier",
+              "fieldType": "file",
+              "requiredField": true,
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf,.txt,.md,.html,.htm,.csv,.rtf"
+            },
+            {
+              "fieldLabel": "Collection",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "ex : philosophie"
+            },
+            {
+              "fieldLabel": "Titre",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "ex : Les 100 citations de la philosophie"
+            },
+            {
+              "fieldLabel": "Description",
+              "fieldType": "textarea",
+              "placeholder": "De quoi parle ce document ?"
+            },
+            {
+              "fieldLabel": "Mode d'extraction (PDF)",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Rapide (texte)"
+                  },
+                  {
+                    "option": "OCR Markdown (Gemini)"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Stratégie de chunking",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Récursif (par défaut)"
+                  },
+                  {
+                    "option": "Sémantique (embeddings)"
+                  },
+                  {
+                    "option": "IA (Gemini)"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Nombre max de chunks (optionnel)",
+              "fieldType": "number",
+              "placeholder": "ex : 60 pour une démo rapide (vide = tout le document)"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "76fdeb81-3f27-f748-5624-9fd19f9d3196",
+      "name": "Détecter le format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Déduit le format du fichier envoyé (extension) et les choix du formulaire ; le fichier reste en binaire\nconst it = $input.first();\nconst b = (it.binary && it.binary.Fichier) || {};\nconst nom = b.fileName || '';\nconst ext = String(b.fileExtension || nom.split('.').pop() || '').toLowerCase();\nconst format = ext === 'pdf' ? 'pdf' : ext === 'csv' ? 'csv' : ['txt', 'md', 'markdown', 'text', 'html', 'htm', 'rtf'].includes(ext) ? 'texte' : 'inconnu';\nconst ocr = format === 'pdf' && /ocr/i.test(String(it.json[\"Mode d'extraction (PDF)\"] || ''));\nreturn [{ json: { ...it.json, extension: ext, nom_fichier: nom, format, ocr }, binary: it.binary }];"
+      }
+    },
+    {
+      "id": "76e7bfe5-31ea-5555-42c7-f725e3e96319",
+      "name": "Routage par type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "renameOutput": true,
+              "outputKey": "pdf (texte rapide)",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.format }}",
+                    "rightValue": "pdf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.ocr }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "false",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "csv",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.format }}",
+                    "rightValue": "csv",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "texte, html, rtf",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.format }}",
+                    "rightValue": "texte",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "pdf (OCR Markdown)",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.format }}",
+                    "rightValue": "pdf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.ocr }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "non géré"
+        }
+      }
+    },
+    {
+      "id": "39946006-3434-098b-8de1-f090cf8228ca",
+      "name": "Extraction PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        -160
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "Fichier",
+        "options": {}
+      }
+    },
+    {
+      "id": "5093622d-0e1f-7d70-fa38-8f10c176bdad",
+      "name": "Extraction CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        0
+      ],
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "Fichier",
+        "options": {}
+      }
+    },
+    {
+      "id": "04d3da1a-4dd0-58b0-b882-721e81a5c798",
+      "name": "Extraction texte",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        160
+      ],
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "Fichier",
+        "destinationKey": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "8f067891-44fa-4798-82c2-218a4180d5ef",
+      "name": "Format non géré",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const m = $input.first().json;\nthrow new Error('Type de fichier non géré : « ' + (m.extension || 'inconnu') + ' » (formats acceptés : PDF, TXT, MD, HTML, CSV, RTF). Aucune écriture dans la base.');"
+      }
+    },
+    {
+      "id": "8f922266-3978-cdf2-f662-bb9e0c225b84",
+      "name": "Texte PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        -160
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "return [{ json: { texte: String($input.first().json.text || '') } }];"
+      }
+    },
+    {
+      "id": "601bd61d-9508-b8dc-0b6c-55f816d06df2",
+      "name": "Texte CSV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Chaque ligne du CSV devient un paragraphe « colonne : valeur ; colonne : valeur »\nconst lignes = $input.all().map(i => Object.entries(i.json).filter(([, v]) => v !== null && v !== '').map(([k, v]) => k + ' : ' + v).join(' ; '));\nreturn [{ json: { texte: lignes.join('\\n\\n') } }];"
+      }
+    },
+    {
+      "id": "1a73ca5f-51bd-7d27-477c-67a6a229bc2a",
+      "name": "Texte TXT HTML RTF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        160
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Texte brut tel quel ; HTML : balises retirées ; RTF : codes de mise en forme retirés (heuristique)\nconst ext = $('Détecter le format').first().json.extension;\nlet t = String($input.first().json.data ?? $input.first().json.text ?? '');\nif (ext === 'html' || ext === 'htm') {\n  t = t.replace(/<(script|style)[\\s\\S]*?<\\/\\1>/gi, ' ')\n    .replace(/<\\/(p|div|h[1-6]|li|tr|section|article)>/gi, '\\n\\n').replace(/<br\\s*\\/?>/gi, '\\n').replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '\"').replace(/&#39;|&apos;/g, \"'\");\n} else if (ext === 'rtf') {\n  t = t.replace(/\\\\pard?/g, '\\n').replace(/\\\\'([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))\n    .replace(/\\{\\\\\\*[^{}]*\\}/g, '').replace(/\\\\[a-z]+-?\\d* ?/gi, '').replace(/[{}]/g, '');\n}\nreturn [{ json: { texte: t } }];"
+      }
+    },
+    {
+      "id": "2c7d1c41-18a3-3d77-ee60-4aa69002dbed",
+      "name": "Construire l'entrée (formulaire)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Entrée commune du pipeline : un item {texte, collection, titre, description, source, format, params}\nconst meta = $('Détecter le format').first().json;\nconst f = $('Formulaire').first().json;\nconst collection = String(f.Collection || '').trim();\nif (!collection) throw new Error('La collection est obligatoire');\nconst titre = String(f.Titre || '').trim() || meta.nom_fichier || 'Document';\nconst slug = s => s.normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');\nconst params = { taille: 1200, chevauchement: 150, min_chunks: 50, max_chunks: 300 };\n// mode démo / test : avec un nombre max de chunks, le plancher de 50 chunks ne s'applique plus (un petit document passe)\n// et le document reçoit une source « ::demo » distincte : un essai partiel ne peut jamais remplacer un document complet\nconst limite = Number(f['Nombre max de chunks (optionnel)']);\nif (limite > 0) { params.limite = limite; params.min_chunks = 1; }\nconst strat = String(f['Stratégie de chunking'] || '');\nif (/s[ée]mantique/i.test(strat)) params.strategie = 'semantique';\nelse if (/\\bIA\\b/.test(strat)) params.strategie = 'ia';\nconst entree = $input.first().json; // texte extrait (ou transcrit par l'OCR, auquel cas format = markdown)\nreturn [{ json: { texte: entree.texte, collection, titre, description: String(f.Description || '').trim(), source: slug(collection) + '::' + slug(titre) + (limite > 0 ? '::demo' : ''), format: entree.format || meta.format, params } }];"
+      }
+    },
+    {
+      "id": "e965f3ad-2698-c1fd-447e-743c6b1a613d",
+      "name": "Webhook texte",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        560
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "rag-ingestion",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "23746099-f5c8-7104-aa45-1f8a0e0c1387",
+      "name": "PDF en base64 ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        560
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pb1",
+              "leftValue": "={{ !!($json.body && $json.body.pdf_base64) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "6114ff48-84cf-7d6b-94fc-3340a09a5b11",
+      "name": "Construire l'entrée (API)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        560
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Entrée par API : POST {collection, titre, description, texte | pdf_base64, strategie?, params?} ; même entrée commune que le formulaire\nconst b = $('Webhook texte').first().json.body || {};\nconst ocr = $input.first().json; // vient du webhook directement, ou de l'OCR (texte + format markdown)\nconst texte = ocr.texte !== undefined ? ocr.texte : b.texte;\nif (!texte || !b.collection || !b.titre) throw new Error('Champs obligatoires : collection, titre, et texte ou pdf_base64');\nconst slug = s => String(s).normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');\nconst params = { taille: 1200, chevauchement: 150, min_chunks: 50, max_chunks: 300, ...(b.params || {}) };\nif (b.strategie) params.strategie = b.strategie;\n// avec une limite (démo, test), la source est distincte : un essai partiel ne remplace jamais un document complet\nconst demo = Number(params.limite) > 0 ? '::demo' : '';\nreturn [{ json: { texte: String(texte), collection: String(b.collection).trim(), titre: String(b.titre).trim(), description: String(b.description || ''), source: slug(b.collection) + '::' + slug(b.titre) + demo, format: ocr.format || b.format || 'texte', params } }];"
+      }
+    },
+    {
+      "id": "dc505f8f-18d4-a315-1086-45181b8046bf",
+      "name": "Préparer le PDF (OCR)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        -420
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// OCR (1/3) : prépare le PDF (formulaire : fichier binaire ; API : champ pdf_base64) pour une transcription en Markdown par Gemini\nconst it = $input.first();\nlet b64; let origine;\nif (it.binary && it.binary.Fichier) {\n  const buf = await this.helpers.getBinaryDataBuffer(0, 'Fichier');\n  b64 = buf.toString('base64'); origine = 'formulaire';\n} else if (it.json.body && it.json.body.pdf_base64) {\n  b64 = String(it.json.body.pdf_base64).replace(/^data:.*?;base64,/, ''); origine = 'api';\n} else {\n  throw new Error('Aucun PDF à analyser pour l\\'OCR');\n}\nif (b64.length > 25000000) throw new Error('PDF trop volumineux pour l\\'OCR (limite : environ 18 Mo)');\nconst prompt = 'Transcris fidèlement ce document PDF en Markdown. Conserve la structure : titres (#, ##, ###) selon leur importance, paragraphes, listes à puces ou numérotées, tableaux Markdown. Ne résume rien, n\\'ajoute aucun commentaire, ne traduis pas. Omets les numéros de page et les en-têtes ou pieds de page qui se répètent. Réponds uniquement avec le Markdown, sans bloc de code autour.';\nreturn [{ json: { origine, pdf_b64: b64, prompt } }];"
+      }
+    },
+    {
+      "id": "a9ad4de0-ec1f-4fe8-9e64-b80a1aa962df",
+      "name": "OCR Markdown (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1060,
+        -420
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ inline_data: { mime_type: 'application/pdf', data: $json.pdf_b64 } }, { text: $json.prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 65536 } }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "notes": "Credential à choisir : Google Gemini(PaLM) Api",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "47aa005b-b0ec-3d76-97f7-d28104b06df8",
+      "name": "Texte OCR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -420
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// OCR (3/3) : récupère le Markdown renvoyé par Gemini ; refuse une transcription tronquée (indexer la moitié d'un document sans le dire serait pire qu'échouer)\nconst r = $input.first().json;\nconst cand = r.candidates && r.candidates[0];\nlet texte = ((cand && cand.content && cand.content.parts) || []).map(p => p.text || '').join('').trim();\nif (!texte) throw new Error('L\\'OCR n\\'a renvoyé aucun texte (' + ((cand && cand.finishReason) || 'réponse vide') + ')');\nif (cand.finishReason === 'MAX_TOKENS') throw new Error('OCR interrompu : le document est trop long pour une seule transcription (limite de sortie atteinte). Utilisez le mode « Rapide (texte) ».');\ntexte = texte.replace(/^```(?:markdown|md)?\\s*\\n/i, '').replace(/\\n```\\s*$/, '');\nconst origine = $('Préparer le PDF (OCR)').first().json.origine;\nreturn [{ json: { texte, format: 'markdown', origine } }];"
+      }
+    },
+    {
+      "id": "17279b9c-3532-008e-fabb-87029cef2c8e",
+      "name": "Origine ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1580,
+        -420
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "og1",
+              "leftValue": "={{ $json.origine === 'api' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "18ca0b63-acdd-9169-fc3f-d32c062e5ada",
+      "name": "Chunking",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1580,
+        280
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "RAG - Chunking (sous-workflow)"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Sélectionner le sous-workflow : RAG - Chunking (sous-workflow)",
+      "notesInFlow": true
+    },
+    {
+      "id": "28937343-af83-2f1d-a332-8af4de8ed3d2",
+      "name": "Contrôle du nombre de chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        280
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// GARDE-FOU : le pipeline attend entre min_chunks et max_chunks chunks (50 et 300 par défaut) ; en dehors, on arrête avant tout appel Gemini et toute écriture.\n// Avec params.limite (démo rapide), seuls les `limite` premiers chunks seront traités par le nœud Limit : le plafond max ne s'applique plus, le plancher oui.\nconst items = $input.all();\nconst p = (items[0] && items[0].json.params) || {};\nconst min = Number(p.min_chunks) || 50;\nconst max = Number(p.max_chunks) || 300;\nconst limite = Number(p.limite) || 0;\nconst n = items.length;\nif (limite) {\n  if (Math.min(n, limite) < min) throw new Error('Nombre de chunks hors limites : ' + Math.min(n, limite) + ' après limitation (minimum : ' + min + '). Aucune écriture dans la base.');\n} else if (n < min || n > max) {\n  throw new Error('Nombre de chunks hors limites : ' + n + ' (attendu : entre ' + min + ' et ' + max + '). Ajuster le document ou les paramètres (taille, bornes, nombre max de chunks). Aucune écriture dans la base.');\n}\nreturn items;"
+      }
+    },
+    {
+      "id": "eec85966-d1d4-5801-ced7-47a9d6da0f42",
+      "name": "Limite de chunks",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        2100,
+        280
+      ],
+      "parameters": {
+        "maxItems": "={{ Number($json.params.limite) || $json.params.max_chunks || 300 }}",
+        "keep": "firstItems"
+      }
+    },
+    {
+      "id": "74b3764d-4e75-d89d-afc2-8f89c733f30b",
+      "name": "Augmentation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2360,
+        280
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "RAG - Augmentation (sous-workflow)"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Sélectionner le sous-workflow : RAG - Augmentation (sous-workflow)",
+      "notesInFlow": true
+    },
+    {
+      "id": "181f8667-66a6-6b17-f4b3-47ec386ebd30",
+      "name": "Enregistrement",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2620,
+        280
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "RAG - Enregistrement (sous-workflow)"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Sélectionner le sous-workflow : RAG - Enregistrement (sous-workflow)",
+      "notesInFlow": true
+    },
+    {
+      "id": "912beccc-03a8-4ed6-8f91-e260295c5b23",
+      "name": "Résultat",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2880,
+        280
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "ok",
+              "type": "boolean",
+              "value": "={{ $json.ok }}"
+            },
+            {
+              "id": "r2",
+              "name": "collection",
+              "type": "string",
+              "value": "={{ $json.collection }}"
+            },
+            {
+              "id": "r3",
+              "name": "source",
+              "type": "string",
+              "value": "={{ $json.source }}"
+            },
+            {
+              "id": "r4",
+              "name": "chunks",
+              "type": "number",
+              "value": "={{ $json.chunks }}"
+            },
+            {
+              "id": "r5",
+              "name": "message",
+              "type": "string",
+              "value": "={{ 'Document indexé : ' + $json.chunks + ' chunks dans la collection « ' + $json.collection + ' ».' }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Formulaire": {
+      "main": [
+        [
+          {
+            "node": "Détecter le format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Détecter le format": {
+      "main": [
+        [
+          {
+            "node": "Routage par type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Routage par type": {
+      "main": [
+        [
+          {
+            "node": "Extraction PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extraction CSV",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extraction texte",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Préparer le PDF (OCR)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format non géré",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction PDF": {
+      "main": [
+        [
+          {
+            "node": "Texte PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction CSV": {
+      "main": [
+        [
+          {
+            "node": "Texte CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction texte": {
+      "main": [
+        [
+          {
+            "node": "Texte TXT HTML RTF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texte PDF": {
+      "main": [
+        [
+          {
+            "node": "Construire l'entrée (formulaire)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texte CSV": {
+      "main": [
+        [
+          {
+            "node": "Construire l'entrée (formulaire)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texte TXT HTML RTF": {
+      "main": [
+        [
+          {
+            "node": "Construire l'entrée (formulaire)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook texte": {
+      "main": [
+        [
+          {
+            "node": "PDF en base64 ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDF en base64 ?": {
+      "main": [
+        [
+          {
+            "node": "Préparer le PDF (OCR)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Construire l'entrée (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer le PDF (OCR)": {
+      "main": [
+        [
+          {
+            "node": "OCR Markdown (Gemini)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OCR Markdown (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Texte OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texte OCR": {
+      "main": [
+        [
+          {
+            "node": "Origine ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Origine ?": {
+      "main": [
+        [
+          {
+            "node": "Construire l'entrée (API)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Construire l'entrée (formulaire)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire l'entrée (formulaire)": {
+      "main": [
+        [
+          {
+            "node": "Chunking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire l'entrée (API)": {
+      "main": [
+        [
+          {
+            "node": "Chunking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunking": {
+      "main": [
+        [
+          {
+            "node": "Contrôle du nombre de chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contrôle du nombre de chunks": {
+      "main": [
+        [
+          {
+            "node": "Limite de chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limite de chunks": {
+      "main": [
+        [
+          {
+            "node": "Augmentation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Augmentation": {
+      "main": [
+        [
+          {
+            "node": "Enregistrement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrement": {
+      "main": [
+        [
+          {
+            "node": "Résultat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Pipeline RAG universel, face Ingestion : formulaire ou webhook, extraction (rapide ou OCR Markdown), puis sous-workflows Chunking, Augmentation et Enregistrement."
+  }
+}

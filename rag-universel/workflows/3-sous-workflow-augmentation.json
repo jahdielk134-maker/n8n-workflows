@@ -1,0 +1,172 @@
+{
+  "name": "RAG - Augmentation (sous-workflow)",
+  "nodes": [
+    {
+      "id": "4640e554-ff6d-d714-806f-b0bd5af0e97c",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "030b130e-e716-fdb1-ba63-e1e798028a54",
+      "name": "Préparer les groupes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        130,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// GROUPES : un appel Gemini traite un groupe de chunks (8 par défaut, réglable avec params.groupe) ; chaque chunk garde son propre enrichissement\nconst items = $input.all();\nconst TAILLE_GROUPE = Number(items[0] && items[0].json.params && items[0].json.params.groupe) || 8;\nconst groupes = [];\nfor (let i = 0; i < items.length; i += TAILLE_GROUPE) {\n  const lot = items.slice(i, i + TAILLE_GROUPE);\n  const d = lot[0].json;\n  const extraits = lot.map(x => '=== Extrait n° ' + x.json.ordre + ' ===\\n' + x.json.texte).join('\\n\\n');\n  groupes.push({ json: { debut: i, nombre: lot.length, prompt: 'Document : ' + d.titre + '\\nDescription : ' + d.description + '\\n\\nVoici ' + lot.length + ' extraits de ce document. Produis un enrichissement pour CHACUN, dans le même ordre.\\n\\n' + extraits } });\n}\nreturn groupes;"
+      }
+    },
+    {
+      "id": "eba5253f-823a-5853-dfcd-83f7bd508ba1",
+      "name": "Enrichissement Gemini",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu aides à indexer un document dans une base de connaissances pour un assistant de questions-réponses. On te donne le titre et la description du document, puis plusieurs extraits numérotés de ce document. Pour CHAQUE extrait, traité séparément et à partir de cet extrait uniquement, produis : n (le numéro de l'extrait tel qu'indiqué), contexte (1 à 2 phrases qui situent l'extrait dans le document : de quoi parle ce passage et où il s'inscrit ; elles seront ajoutées au début de l'extrait pour faciliter la recherche), resume (2 phrases), mots_cles (5 à 8 mots-clés ou notions), questions (3 questions qu'un lecteur pourrait poser et auxquelles cet extrait répond), entites (les personnes, organisations, lieux, concepts, œuvres et autres notions importantes cités, avec leur type), relations (0 à 6 liens entre ces entités sous la forme sujet, relation, objet). Renvoie exactement une entrée par extrait, dans l'ordre des extraits. N'invente rien : reste fidèle à chaque extrait et ne mélange pas les extraits entre eux."
+            }
+          ]
+        },
+        "batching": {
+          "batchSize": 2,
+          "delayBetweenBatches": 1000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "1f66f1b3-d220-89a6-e947-2bf226587f92",
+      "name": "Gemini Flash-Lite (enrichissement)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        240
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0.2
+        }
+      }
+    },
+    {
+      "id": "ae114c53-3352-84c2-fc18-4d06727e251d",
+      "name": "Format de l'enrichissement",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        400,
+        240
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"enrichissements\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\"},\"contexte\":{\"type\":\"string\"},\"resume\":{\"type\":\"string\"},\"mots_cles\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"questions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"entites\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"nom\":{\"type\":\"string\"},\"type\":{\"type\":\"string\",\"enum\":[\"personne\",\"organisation\",\"lieu\",\"concept\",\"œuvre\",\"autre\"]}},\"required\":[\"nom\",\"type\"]}},\"relations\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"sujet\":{\"type\":\"string\"},\"relation\":{\"type\":\"string\"},\"objet\":{\"type\":\"string\"}},\"required\":[\"sujet\",\"relation\",\"objet\"]}}},\"required\":[\"n\",\"contexte\",\"resume\",\"mots_cles\",\"questions\",\"entites\",\"relations\"]}}},\"required\":[\"enrichissements\"]}"
+      }
+    },
+    {
+      "id": "9ebfa8c1-0219-bc3b-8c02-01c5c36a1b9c",
+      "name": "Assemblage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ASSEMBLAGE : redistribue les enrichissements des groupes sur chaque chunk ; produit un item par chunk, avec le texte à vectoriser\nconst sources = $('When Executed by Another Workflow').all();\nconst groupes = $('Préparer les groupes').all();\nconst sorties = $input.all();\nif (sorties.length !== groupes.length) throw new Error('Enrichissement incomplet : ' + sorties.length + ' réponses pour ' + groupes.length + ' groupes');\n\nconst enrichis = [];\nsorties.forEach((s, g) => {\n  let out = s.json.output ?? s.json.text ?? s.json;\n  if (typeof out === 'string') out = JSON.parse(out);\n  const liste = out && out.enrichissements;\n  const { debut, nombre } = groupes[g].json;\n  if (!Array.isArray(liste) || liste.length !== nombre) throw new Error('Groupe ' + (g + 1) + ' : ' + (Array.isArray(liste) ? liste.length : 0) + ' enrichissements reçus pour ' + nombre + ' extraits');\n  const ordres = sources.slice(debut, debut + nombre).map(x => x.json.ordre);\n  const parNumero = new Map(liste.map(e => [Number(e.n), e]));\n  // on s'appuie sur le numéro d'extrait renvoyé quand il est cohérent, sinon sur l'ordre\n  enrichis.push(...(ordres.every(o => parNumero.has(o)) ? ordres.map(o => parNumero.get(o)) : liste));\n});\n\nreturn enrichis.map((enr, i) => {\n  const src = sources[i].json;\n  if (!enr || !enr.resume || !enr.contexte || !Array.isArray(enr.mots_cles) || !Array.isArray(enr.questions) || !Array.isArray(enr.entites) || !Array.isArray(enr.relations)) {\n    throw new Error('Enrichissement invalide pour le chunk n°' + src.ordre);\n  }\n  const entites = enr.entites.map(x => x.nom + ' (' + x.type + ')').join(', ');\n  const relations = enr.relations.map(r => r.sujet + ' — ' + r.relation + ' → ' + r.objet).join(' | ');\n  const texte_embedding = [\n    'Document : ' + src.titre,\n    'Contexte : ' + enr.contexte,\n    '',\n    src.texte,\n    '',\n    'Résumé : ' + enr.resume,\n    'Mots-clés : ' + enr.mots_cles.join(', '),\n    'Questions types : ' + enr.questions.join(' | '),\n    'Entités : ' + entites,\n    'Relations : ' + relations\n  ].join('\\n');\n  return { json: { collection: src.collection, titre: src.titre, description: src.description, source: src.source, format: src.format, params: src.params, ordre: src.ordre, texte: src.texte, contexte: enr.contexte, resume: enr.resume, questions: enr.questions, mots_cles: enr.mots_cles, entites: enr.entites, relations: enr.relations, texte_embedding } };\n});"
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Préparer les groupes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer les groupes": {
+      "main": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichissement Gemini": {
+      "main": [
+        [
+          {
+            "node": "Assemblage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash-Lite (enrichissement)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format de l'enrichissement": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Enrichissement Gemini",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Sous-workflow universel : un appel Gemini par groupe de 8 chunks (contexte, résumé, mots-clés, questions, entités, relations), redistribué sur chaque chunk."
+  }
+}

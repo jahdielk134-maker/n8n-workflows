@@ -1,0 +1,794 @@
+{
+  "name": "RAG - Chat (orchestrateur)",
+  "nodes": [
+    {
+      "id": "8517d250-e929-3eea-f149-9bd4e9558ed5",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "public": false,
+        "options": {
+          "responseMode": "lastNode"
+        }
+      }
+    },
+    {
+      "id": "13c0f903-02f7-2b20-129a-f82690643972",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "k1",
+              "name": "collection",
+              "type": "string",
+              "value": "toutes"
+            },
+            {
+              "id": "k2",
+              "name": "topK",
+              "type": "number",
+              "value": 40
+            },
+            {
+              "id": "k3",
+              "name": "seuil",
+              "type": "number",
+              "value": 6
+            }
+          ]
+        }
+      },
+      "notes": "Réglages : collection interrogée (« toutes » ou le nom d'une collection), nombre de passages cherchés, seuil de reranking",
+      "notesInFlow": true
+    },
+    {
+      "id": "daec52f9-4257-df7e-0796-3f39bceeaa5f",
+      "name": "Lire l'historique",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        390,
+        0
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT role, content FROM rag_messages WHERE session_id = $1 ORDER BY id DESC LIMIT 10",
+        "options": {
+          "queryReplacement": "={{ [$('When chat message received').first().json.sessionId] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "11a975b0-a80d-bfec-d247-dbbf9ec4a8e2",
+      "name": "Conversation vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "h1",
+              "leftValue": "={{ $input.all().filter(i => i.json.content).length === 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "8bf2be54-5b34-8e91-83dd-167bf2658c4d",
+      "name": "Sans historique",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        650,
+        -100
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "h2",
+              "name": "historique",
+              "type": "string",
+              "value": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0ac5a839-c5b1-f1e7-4302-afff04d35ba6",
+      "name": "Formater l'historique",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Les 10 derniers messages de la session, du plus ancien au plus récent\nconst lignes = $input.all().map(i => i.json).filter(j => j.content).reverse();\nreturn [{ json: { historique: lignes.map(j => (j.role === 'user' ? 'Utilisateur' : 'Assistant') + ' : ' + String(j.content).slice(0, 600)).join('\\n') } }];"
+      }
+    },
+    {
+      "id": "61b23afd-f5f9-89a2-2dc5-0ab11bcd3a29",
+      "name": "Sélection",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ ($json.historique ? 'Historique de la conversation (du plus ancien au plus récent) :\\n' + $json.historique + '\\n\\nSi le message est une relance qui dépend de l\\'historique (« résume », « et lui ? », « explique plus »), réintègre le sujet de la conversation dans les entités, les mots-clés et les requêtes, pour que la recherche se suffise à elle-même. Si le message n\\'a aucun rapport avec l\\'historique, ignore-le.\\n\\n' : '') + 'Message de l\\'utilisateur : ' + $('When chat message received').first().json.chatInput }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu analyses un message envoyé à un assistant qui répond à partir d'une base de documents indexés. Tu ne réponds JAMAIS à la question toi-même : tu ne fais que l'analyser (routage), et tu n'inventes jamais de sujet qui n'est pas dans le message.\n\nChamps à renvoyer :\n- type : « salutation » si le message est vide, une simple salutation (bonjour, salut, hello, coucou), un remerciement ou ne contient aucune question ; sinon « question » (même si la question n'a aucun rapport avec les documents).\n- entites : les noms propres, personnes, organisations, lieux, œuvres cités dans le message (liste vide s'il n'y en a aucun). Ils servent de filtre.\n- mots_cles : 2 à 5 mots ou notions clés du message, au sens large (liste vide pour une salutation). Ils servent à classer les passages.\n- requetes : 1 à 3 reformulations de la question en français pour une recherche sémantique (la première reste proche de la question, les suivantes l'abordent sous un autre angle ou avec des synonymes ; garde les noms propres et supprime les formules de politesse). Liste vide pour une salutation.\n\nExemples :\n« Salut ! » → type salutation, entites [], mots_cles [], requetes []\n« Merci beaucoup » → type salutation, entites [], mots_cles [], requetes []\n« Que dit Sartre sur les autres ? » → type question, entites [« Sartre »], mots_cles [« autrui », « relation aux autres », « enfer »], requetes [« Sartre : position sur les autres », « le regard d'autrui et l'enfer chez Sartre »]\n« Quelle est la capitale de l'Australie ? » → type question, entites [« Australie »], mots_cles [« capitale », « Australie »], requetes [« capitale de l'Australie »]"
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 4000
+    },
+    {
+      "id": "e9d4bb89-40b7-58e5-9abd-19e7d861acb4",
+      "name": "Gemini Flash (sélection)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        740,
+        240
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "6a114f70-34c8-d1c9-3d9f-106cc44ad0ca",
+      "name": "Format de la sélection",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        920,
+        240
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"salutation\",\"question\"]},\"entites\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"mots_cles\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"requetes\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"type\",\"entites\",\"mots_cles\",\"requetes\"]}"
+      }
+    },
+    {
+      "id": "c27dc060-5835-cf8c-4551-03f80c8ab11f",
+      "name": "Salutation ou message vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "or",
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.output.type }}",
+              "rightValue": "salutation",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c1b",
+              "leftValue": "={{ /^\\s*(salut|bonjour|bonsoir|hello|hi|hey|coucou|merci|ok)?[\\s!.?]*$/i.test($('When chat message received').first().json.chatInput) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "8399a8c5-29c6-f8fb-4107-851a3cd2e0ac",
+      "name": "Réponse d'accueil",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1300,
+        -140
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "output",
+              "type": "string",
+              "value": "Bonjour ! Posez-moi une question : je réponds uniquement à partir des documents indexés dans la base de connaissances."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "19afecac-6cca-5d56-ccaf-32d020d03ace",
+      "name": "Préparer la recherche",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Rassemble ce dont le sous-workflow Recherche a besoin : configuration (collection, réglages) et routage (entités, mots-clés, requêtes) ; garde aussi l'historique pour l'agent\nconst cfg = $('Configuration').first().json;\nconst sel = $('Sélection').first().json.output;\nconst question = $('When chat message received').first().json.chatInput;\nlet historique = '';\ntry { historique = $('Formater l\\'historique').first().json.historique || ''; } catch (e) { historique = ''; }\nconst requetes = (sel.requetes || []).filter(Boolean).slice(0, 3);\nreturn [{ json: { requetes: requetes.length ? requetes : [question], questionOriginale: question, collection: cfg.collection, entites: sel.entites || [], mots_cles: sel.mots_cles || [], topK: cfg.topK, seuil: cfg.seuil, historique } }];"
+      }
+    },
+    {
+      "id": "8ef40cb9-9091-127f-e932-a55ded7fd060",
+      "name": "Recherche",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1560,
+        120
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "RAG - Recherche (sous-workflow)"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Sélectionner le sous-workflow : RAG - Recherche (sous-workflow)",
+      "notesInFlow": true
+    },
+    {
+      "id": "f16b6096-8210-5689-1595-b9d96b644099",
+      "name": "Aucun document ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1820,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.vide }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d3025a8d-2b00-7d70-b4eb-3b824917f3eb",
+      "name": "Réponse aucun document",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2080,
+        0
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a2",
+              "name": "output",
+              "type": "string",
+              "value": "Aucun document n'est indexé pour cette collection. Indexez d'abord un document avec le formulaire d'ingestion, ou changez la collection dans le nœud Configuration."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "8bf53fc8-6166-55e7-bedc-cffc5aa38ae6",
+      "name": "Rien de pertinent ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2080,
+        240
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.refus }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b7c4ca48-79ef-0a25-4baa-5b01fb797435",
+      "name": "Réponse de refus",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2340,
+        120
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a3",
+              "name": "output",
+              "type": "string",
+              "value": "Je ne trouve pas la réponse à cette question dans les documents indexés. Essayez de la reformuler, ou posez une question sur le contenu des documents."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d141c40b-f587-9e71-55a2-92873318b834",
+      "name": "Agent de réponse",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2340,
+        360
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.questionOriginale }}",
+        "options": {
+          "systemMessage": "={{ 'Tu réponds en français, uniquement à partir des extraits de documents fournis. N\\'utilise aucune autre connaissance et n\\'invente rien. Tiens compte de la conversation en cours pour répondre (par exemple une demande de résumé). Rédige une réponse claire et concise. Termine par une section « Sources » qui liste, pour chaque extrait utilisé, le titre du document, le numéro de l\\'extrait et son entité principale (ligne « Entité principale », recopiée telle quelle, une seule), au format : Titre du document (extrait n° X) — entité principale. Ces informations figurent en tête de chaque extrait.' + ($('Préparer la recherche').first().json.historique ? '\\n\\nConversation en cours (du plus ancien au plus récent) :\\n' + $('Préparer la recherche').first().json.historique : '') + '\\n\\nExtraits :\\n\\n' + $json.contexte }}",
+          "enableStreaming": false
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 4000
+    },
+    {
+      "id": "9bb3dc31-0fd6-7612-93e4-e10248735522",
+      "name": "Gemini Flash (génération)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        2300,
+        600
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3-flash-preview",
+        "options": {
+          "temperature": 0.3
+        }
+      }
+    },
+    {
+      "id": "be013692-546a-e3a3-ca61-34c69a13b200",
+      "name": "Réponse",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2600,
+        120
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "output",
+              "type": "string",
+              "value": "={{ $json.output }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "279ae656-15b5-92eb-b6d0-39664f38a520",
+      "name": "Enregistrer l'échange",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2860,
+        120
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "WITH ins AS (INSERT INTO rag_messages (session_id, role, content) VALUES ($1, 'user', $2), ($1, 'assistant', $3) RETURNING id) SELECT count(*) AS enregistres FROM ins",
+        "options": {
+          "queryReplacement": "={{ [$('When chat message received').first().json.sessionId, $('When chat message received').first().json.chatInput, $json.output] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "9c20460b-b3c0-3379-5e7c-248ad807ac12",
+      "name": "Réponse du chat",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        3120,
+        120
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o2",
+              "name": "output",
+              "type": "string",
+              "value": "={{ $('Réponse').first().json.output }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Lire l'historique",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire l'historique": {
+      "main": [
+        [
+          {
+            "node": "Conversation vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation vide ?": {
+      "main": [
+        [
+          {
+            "node": "Sans historique",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Formater l'historique",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sans historique": {
+      "main": [
+        [
+          {
+            "node": "Sélection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formater l'historique": {
+      "main": [
+        [
+          {
+            "node": "Sélection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sélection": {
+      "main": [
+        [
+          {
+            "node": "Salutation ou message vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salutation ou message vide ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse d'accueil",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Préparer la recherche",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer la recherche": {
+      "main": [
+        [
+          {
+            "node": "Recherche",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recherche": {
+      "main": [
+        [
+          {
+            "node": "Aucun document ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aucun document ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse aucun document",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rien de pertinent ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rien de pertinent ?": {
+      "main": [
+        [
+          {
+            "node": "Réponse de refus",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Agent de réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse d'accueil": {
+      "main": [
+        [
+          {
+            "node": "Réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse aucun document": {
+      "main": [
+        [
+          {
+            "node": "Réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse de refus": {
+      "main": [
+        [
+          {
+            "node": "Réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent de réponse": {
+      "main": [
+        [
+          {
+            "node": "Réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer l'échange",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrer l'échange": {
+      "main": [
+        [
+          {
+            "node": "Réponse du chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (sélection)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Sélection",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format de la sélection": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Sélection",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (génération)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Agent de réponse",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Pipeline RAG universel, face Answering : contexte (historique Postgres), routage, sous-workflow Recherche, AI Agent."
+  }
+}

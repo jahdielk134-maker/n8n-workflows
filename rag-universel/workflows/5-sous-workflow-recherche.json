@@ -1,0 +1,346 @@
+{
+  "name": "RAG - Recherche (sous-workflow)",
+  "nodes": [
+    {
+      "id": "4cec87be-4303-5dba-5925-891a72941383",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "dc8751b8-1260-5605-b5f1-535606e3fcf5",
+      "name": "Une requête par item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        130,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ROUTAGE (suite) : une recherche vectorielle par requête reformulée (1 à 3), pour mieux couvrir la question\nconst cfg = $input.first().json;\nconst requetes = [...new Set((Array.isArray(cfg.requetes) && cfg.requetes.length ? cfg.requetes : [cfg.requete || cfg.questionOriginale]).map(r => String(r || '').trim()).filter(Boolean))].slice(0, 3);\nreturn requetes.map(requete => ({ json: { requete } }));"
+      }
+    },
+    {
+      "id": "a8777445-7162-4e7f-43c5-dc59369cc5e6",
+      "name": "Embedding de la question",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: { parts: [{ text: $json.requete }] } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notes": "Credential à choisir : Google Gemini(PaLM) Api"
+    },
+    {
+      "id": "198c67ff-8c2d-1dff-cb7b-051cdf32497e",
+      "name": "Rechercher en SQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT * FROM rag_match_chunks($1::vector, $2::int, NULLIF($3::text, ''))",
+        "options": {
+          "queryReplacement": "={{ ['[' + $json.embedding.values.join(',') + ']', $('When Executed by Another Workflow').first().json.topK || 40, $('When Executed by Another Workflow').first().json.collection === 'toutes' ? '' : ($('When Executed by Another Workflow').first().json.collection || '')] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "502f8986-9bd7-9990-e88f-51e6e4a955d7",
+      "name": "Filtrage sur les entités",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// FILTRAGE : fusionne les résultats des requêtes, filtre souple sur les entités citées (aucune entité : on garde tout), puis classe en favorisant les passages qui contiennent les mots-clés de la question\nconst cfg = $('When Executed by Another Workflow').first().json;\nconst lignes = $input.all().map(i => i.json).filter(j => j.chunk_id !== undefined && j.chunk_id !== null);\nif (!lignes.length) return [{ json: { vide: true } }];\n\n// un chunk trouvé par plusieurs requêtes garde sa meilleure similarité\nconst parId = new Map();\nfor (const j of lignes) { const e = parId.get(j.chunk_id); if (!e || Number(j.similarity) > Number(e.similarity)) parId.set(j.chunk_id, j); }\nconst brut = [...parId.values()];\n\nconst norm = s => String(s || '').normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase();\nconst noms = (cfg.entites || []).map(norm).filter(Boolean);\nconst motsCles = (cfg.mots_cles || []).map(norm).filter(Boolean);\nconst parle = (j, nom) => norm([j.content, j.contexte, (j.mots_cles || []).join(' '), (j.entites || []).join(' ')].join(' ')).includes(nom);\n\nlet retenus = brut;\nif (noms.length) {\n  const f = brut.filter(j => noms.some(n => parle(j, n)));\n  if (f.length) retenus = f; // si le filtre ne laisse rien, on garde tout\n}\nconst cle = j => Number(j.similarity) + 0.03 * motsCles.filter(m => parle(j, m)).length;\nretenus = retenus.sort((a, b) => cle(b) - cle(a));\n\n// Ce que voit le reranker : contexte, résumé et extrait complet\nconst apercu = j => ['Document : ' + j.titre + ' (extrait n°' + j.ordre + ')', 'Contexte : ' + j.contexte, 'Résumé : ' + j.resume, 'Extrait : ' + String(j.content || '')].join('\\n');\nconst chunks = retenus.slice(0, 15).map((j, i) => ({ id: i + 1, titre: j.titre, ordre: j.ordre, collection: j.collection, texte: 'Document : ' + j.titre + ' (extrait n°' + j.ordre + ')\\nContexte : ' + j.contexte + '\\nEntité principale : ' + ((j.entites || [])[0] || '') + '\\n\\n' + j.content, apercu: apercu(j), entites: j.entites || [], mots_cles: j.mots_cles || [], contenu: j.content }));\n// question autonome : la première requête reformulée (elle intègre l'historique pour une relance comme « résume »)\nconst question = (Array.isArray(cfg.requetes) && cfg.requetes[0]) || cfg.questionOriginale;\nreturn [{ json: { vide: false, questionOriginale: cfg.questionOriginale, question, entites: cfg.entites || [], seuil: Number(cfg.seuil) || 6, chunks } }];"
+      }
+    },
+    {
+      "id": "5ad50d1e-0fd5-b06d-ffa3-999c180a34f4",
+      "name": "Base vide ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.vide }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "71c1efbc-caf0-a778-3037-13c271e2a74a",
+      "name": "Aucun résultat",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1300,
+        -120
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "vide",
+              "type": "boolean",
+              "value": true
+            },
+            {
+              "id": "a2",
+              "name": "refus",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "a3",
+              "name": "contexte",
+              "type": "string",
+              "value": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ad23e8bb-0021-0118-2bb6-ac7df7bd52cf",
+      "name": "Reranking",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1300,
+        120
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'Question : ' + $json.question + ($json.question !== $json.questionOriginale ? '\\n(message de l\\'utilisateur : ' + $json.questionOriginale + ')' : '') + '\\n\\nPassages :\\n\\n' + $json.chunks.map(c => '[' + c.id + '] ' + c.apercu).join('\\n\\n') }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Tu es un reranker. Pour chaque passage numéroté entre crochets, donne un score de pertinence de 0 à 10 pour répondre à la question : 10 = répond directement, 5 = lien partiel, 0 à 2 = autre sujet ou aucun rapport. Sois sévère : un passage qui ne traite pas de ce que demande la question reçoit au plus 2. Exception : si la question compare plusieurs sujets, personnes ou notions, ou en mentionne plusieurs, un passage qui expose la position de l'un d'eux sur le thème demandé est pertinent (7 ou plus), même s'il ne parle pas des autres. Renvoie un score pour chaque passage."
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 4000
+    },
+    {
+      "id": "c2780999-b6d8-5239-15d9-9adffc61c479",
+      "name": "Gemini Flash (reranking)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1260,
+        360
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "c7a3f018-d5d9-a6f6-7048-9c0a3fdff981",
+      "name": "Format du reranking",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1440,
+        360
+      ],
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"scores\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"},\"score\":{\"type\":\"number\"}},\"required\":[\"id\",\"score\"]}}},\"required\":[\"scores\"]}"
+      }
+    },
+    {
+      "id": "1eb23030-0c75-bfa9-1061-0c3c08436861",
+      "name": "Top 5 et seuil",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// RERANKING (suite) : associe les notes aux passages, garde les 5 meilleurs au-dessus du seuil ;\n// question qui cite plusieurs entités : on garantit aussi le meilleur passage (score ≥ 4) de chacune\nconst { chunks, questionOriginale, entites, seuil } = $('Filtrage sur les entités').first().json;\nconst scores = ($input.first().json.output || {}).scores || [];\nconst note = new Map(scores.map(s => [Number(s.id), Number(s.score)]));\nconst norm = s => String(s || '').normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase();\nconst parle = (c, nom) => norm([c.contenu, c.texte, (c.mots_cles || []).join(' '), (c.entites || []).join(' ')].join(' ')).includes(nom);\n\nconst classes = chunks.map(c => ({ ...c, score: note.get(c.id) ?? 0 })).sort((a, b) => b.score - a.score);\nconst retenus = classes.filter(c => c.score >= seuil).slice(0, 5);\n\nconst noms = (entites || []).map(norm).filter(Boolean);\nif (noms.length > 1) {\n  for (const nom of noms) {\n    if (!retenus.some(c => parle(c, nom))) {\n      const meilleur = classes.find(c => parle(c, nom) && c.score >= 4);\n      if (meilleur) retenus.push(meilleur);\n    }\n  }\n}\n\nreturn [{ json: {\n  vide: false,\n  refus: retenus.length === 0,\n  questionOriginale,\n  meilleurScore: classes.length ? classes[0].score : 0,\n  retenus: retenus.map(c => ({ titre: c.titre, extrait: c.ordre, collection: c.collection, score: c.score })),\n  contexte: retenus.map(c => c.texte).join('\\n\\n---\\n\\n')\n} }];"
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Une requête par item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Une requête par item": {
+      "main": [
+        [
+          {
+            "node": "Embedding de la question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embedding de la question": {
+      "main": [
+        [
+          {
+            "node": "Rechercher en SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rechercher en SQL": {
+      "main": [
+        [
+          {
+            "node": "Filtrage sur les entités",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrage sur les entités": {
+      "main": [
+        [
+          {
+            "node": "Base vide ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Base vide ?": {
+      "main": [
+        [
+          {
+            "node": "Aucun résultat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reranking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reranking": {
+      "main": [
+        [
+          {
+            "node": "Top 5 et seuil",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (reranking)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Reranking",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format du reranking": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Reranking",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Sous-workflow universel : embedding de la question (1 à 3 requêtes), recherche SQL dans une collection, filtre sur les entités, classement par mots-clés, reranking Gemini et seuil."
+  }
+}

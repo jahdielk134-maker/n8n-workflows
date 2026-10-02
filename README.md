@@ -91,3 +91,15 @@ Le même livre que le RAG précédent, mais avec une base **persistante** dans S
 5. Lancer le formulaire (environ 15 à 18 minutes), puis poser vos questions dans le chat.
 
 Limites de l'offre gratuite de Gemini : environ 5 requêtes par minute sur le modèle de réponse, donc espacer les questions pendant une démonstration.
+
+## Pipeline RAG universel en sous-workflows (exercice de cours)
+
+[`rag-universel/`](rag-universel/README.md) · [`spec.md`](rag-universel/spec.md) · [`schema.sql`](rag-universel/schema.sql) · 6 workflows dans [`rag-universel/workflows/`](rag-universel/workflows)
+
+La suite des deux RAG précédents : un pipeline qui n'est plus lié à un livre. On indexe n'importe quel document (PDF, TXT, HTML, CSV, RTF) dans une **collection**, puis on l'interroge par un chat, avec ses sources. Il est construit en **sous-workflows** réutilisables, et suit les deux schémas du cours.
+
+**Ingestion** : extraction (rapide ou **OCR en Markdown** par Gemini), **chunking** au choix (récursif, sémantique par embeddings, ou IA) avec chevauchement, **augmentation** (contexte, questions hypothétiques, mots-clés, entités et relations, un appel Gemini par groupe de 8 chunks), vectorisation dans Supabase (tables reliées par identifiant). Garde-fou de 50 à 300 chunks avec un nœud Limit, et mode démo.
+
+**Answering** : **contexte** (historique des messages dans Postgres), **routage** (entités, mots-clés, plusieurs reformulations), **recherche** vectorielle, **reranking** par Gemini, réponse de l'AI Agent avec ses sources, ou refus explicite.
+
+Mesuré sur un livre de 161 chunks : indexé en moins de 7 minutes, réponses du chat en 9 à 14 secondes. Voir le [README du dossier](rag-universel/README.md) pour l'installation et les limites.

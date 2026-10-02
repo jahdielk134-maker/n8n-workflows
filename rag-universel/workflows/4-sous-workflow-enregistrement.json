@@ -1,0 +1,317 @@
+{
+  "name": "RAG - Enregistrement (sous-workflow)",
+  "nodes": [
+    {
+      "id": "204aea0d-cfc2-4715-b494-09fa5d42a257",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "34c94389-4625-f7a2-deec-58f09df47934",
+      "name": "Supprimer l'ancien document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "DELETE FROM rag_documents WHERE source = $1 RETURNING id",
+        "options": {
+          "queryReplacement": "={{ [$('When Executed by Another Workflow').first().json.source] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)",
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "5aa1b522-80a0-edea-a4f9-0292d0d82c2d",
+      "name": "Créer le document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "INSERT INTO rag_documents (collection, titre, description, source) VALUES ($1, $2, $3, $4) RETURNING id",
+        "options": {
+          "queryReplacement": "={{ [$('When Executed by Another Workflow').first().json.collection, $('When Executed by Another Workflow').first().json.titre, $('When Executed by Another Workflow').first().json.description || '', $('When Executed by Another Workflow').first().json.source] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)",
+      "executeOnce": true
+    },
+    {
+      "id": "811f0723-530a-8ff3-69b2-f585d69862a3",
+      "name": "Associer le document aux chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Rattache chaque chunk au document qui vient d'être créé (le nœud précédent renvoie l'identifiant du document)\nconst id = $input.first().json.id;\nreturn $('When Executed by Another Workflow').all().map(i => ({ json: { ...i.json, document_id: id } }));"
+      }
+    },
+    {
+      "id": "6208953c-b1d5-784f-0e22-1c3c49af38df",
+      "name": "Lots de 10",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1040,
+        0
+      ],
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      }
+    },
+    {
+      "id": "3bedf6c2-05e2-6bd1-33db-cfa816811083",
+      "name": "Préparer embedding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Regroupe le lot en UNE requête d'embedding (sinon le nœud HTTP ferait un appel par chunk)\nconst chunks = $input.all().map(i => i.json);\nreturn [{ json: { chunks, requests: chunks.map(c => ({ model: 'models/gemini-embedding-001', content: { parts: [{ text: c.texte_embedding }] } })) } }];"
+      }
+    },
+    {
+      "id": "7eb955b7-fa24-8a37-0d8d-5c852b67e33b",
+      "name": "Embedding HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1560,
+        120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ requests: $json.requests }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "notes": "Credential à choisir : Google Gemini(PaLM) Api"
+    },
+    {
+      "id": "6dd180aa-5806-c5ab-4a26-55a84376efd6",
+      "name": "Préparer insertion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Associe chaque vecteur à son chunk. Garde-fou : l'API gratuite peut renvoyer des vecteurs vides sans erreur.\nconst { chunks } = $('Préparer embedding').first().json;\nconst emb = $input.first().json.embeddings || [];\nif (emb.length !== chunks.length) throw new Error('Embeddings incomplets : ' + emb.length + ' vecteurs pour ' + chunks.length + ' chunks');\nconst vides = emb.filter(e => !e.values || !e.values.length).length;\nif (vides) throw new Error(vides + ' vecteur(s) vide(s) renvoyé(s) par l\\'API d\\'embedding (limite de débit ?)');\n\nconst lignes = chunks.map((c, i) => ({\n  ordre: c.ordre, content: c.texte, contexte: c.contexte, resume: c.resume, questions: c.questions,\n  metadata: { collection: c.collection, source: c.source, titre: c.titre, entites: c.entites.map(e => e.nom), mots_cles: c.mots_cles },\n  embedding: '[' + emb[i].values.join(',') + ']',\n  mots_cles: c.mots_cles, entites: c.entites, relations: c.relations\n}));\nreturn [{ json: { lignes: JSON.stringify(lignes), document_id: chunks[0].document_id } }];"
+      }
+    },
+    {
+      "id": "976953e5-6dd8-8eb2-4222-09d33a57981f",
+      "name": "Enregistrer en SQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2080,
+        120
+      ],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "WITH data AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(ordre int, content text, contexte text, resume text, questions jsonb, metadata jsonb, embedding text, mots_cles jsonb, entites jsonb, relations jsonb)\n),\nchunk_ins AS (\n  INSERT INTO rag_chunks (document_id, ordre, content, contexte, resume, questions, metadata)\n  SELECT $2::bigint, d.ordre, d.content, d.contexte, d.resume, ARRAY(SELECT jsonb_array_elements_text(d.questions)), d.metadata FROM data d\n  RETURNING id, ordre\n),\nemb AS (\n  INSERT INTO rag_embeddings (chunk_id, embedding)\n  SELECT c.id, d.embedding::vector FROM chunk_ins c JOIN data d ON d.ordre = c.ordre\n  RETURNING chunk_id\n),\nmots AS (\n  INSERT INTO rag_mots_cles (chunk_id, mot)\n  SELECT c.id, m FROM chunk_ins c JOIN data d ON d.ordre = c.ordre, jsonb_array_elements_text(d.mots_cles) AS m\n  RETURNING 1\n),\nents AS (\n  INSERT INTO rag_entites (chunk_id, nom, type)\n  SELECT c.id, e->>'nom', e->>'type' FROM chunk_ins c JOIN data d ON d.ordre = c.ordre, jsonb_array_elements(d.entites) AS e\n  RETURNING 1\n),\nrels AS (\n  INSERT INTO rag_relations (chunk_id, sujet, relation, objet)\n  SELECT c.id, r->>'sujet', r->>'relation', r->>'objet' FROM chunk_ins c JOIN data d ON d.ordre = c.ordre, jsonb_array_elements(d.relations) AS r\n  RETURNING 1\n)\nSELECT (SELECT count(*) FROM chunk_ins) AS chunks, (SELECT count(*) FROM emb) AS vecteurs, (SELECT count(*) FROM mots) AS mots_cles, (SELECT count(*) FROM ents) AS entites, (SELECT count(*) FROM rels) AS relations",
+        "options": {
+          "queryReplacement": "={{ [$json.lignes, $json.document_id] }}"
+        }
+      },
+      "notes": "Credential à choisir : Postgres (Supabase, Session pooler)"
+    },
+    {
+      "id": "287895bb-aeff-2a86-d325-d69e8d30697e",
+      "name": "Pause 15 s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2340,
+        120
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $('Lots de 10').context.noItemsLeft ? 0 : 15 }}",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "26363176-83bd-c98d-88c8-f0fbc3ec082f",
+      "name": "Bilan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        -140
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Bilan renvoyé à l'orchestrateur quand tous les lots sont enregistrés\nconst chunks = $('Associer le document aux chunks').all();\nreturn [{ json: { ok: true, document_id: chunks[0].json.document_id, source: chunks[0].json.source, collection: chunks[0].json.collection, chunks: chunks.length } }];"
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Supprimer l'ancien document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supprimer l'ancien document": {
+      "main": [
+        [
+          {
+            "node": "Créer le document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Créer le document": {
+      "main": [
+        [
+          {
+            "node": "Associer le document aux chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associer le document aux chunks": {
+      "main": [
+        [
+          {
+            "node": "Lots de 10",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lots de 10": {
+      "main": [
+        [
+          {
+            "node": "Bilan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Préparer embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer embedding": {
+      "main": [
+        [
+          {
+            "node": "Embedding HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embedding HTTP": {
+      "main": [
+        [
+          {
+            "node": "Préparer insertion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer insertion": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer en SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enregistrer en SQL": {
+      "main": [
+        [
+          {
+            "node": "Pause 15 s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause 15 s": {
+      "main": [
+        [
+          {
+            "node": "Lots de 10",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Sous-workflow universel : remplace un document dans Supabase (documents, chunks, embeddings, mots-clés, entités, relations) par lots de 10 avec pause."
+  }
+}
