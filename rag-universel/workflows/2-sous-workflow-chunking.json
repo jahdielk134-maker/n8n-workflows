@@ -239,7 +239,7 @@
         620
       ],
       "parameters": {
-        "modelName": "models/gemini-3.1-flash-lite",
+        "modelName": "models/gemini-flash-lite-latest",
         "options": {
           "temperature": 0
         }
